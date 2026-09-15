@@ -67,12 +67,6 @@ func run(config config, logger *agentLogger) error {
 	}
 
 	handler := newAgent(osRunner{}, logger, config.OriginAllow)
-	if config.UpdateStatusPath != "" && config.UpdaterLabel != "" {
-		handler.updates = &updateReader{
-			path:  config.UpdateStatusPath,
-			label: config.UpdaterLabel,
-		}
-	}
 
 	if len(config.OriginAllow) == 0 {
 		logger.write("origin posture: log-and-allow (no --origin-allow configured)")
