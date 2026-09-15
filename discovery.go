@@ -4,8 +4,20 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/url"
+	"regexp"
 	"strings"
 )
+
+// defaultPrinterMatch is the pattern a CUPS queue has to satisfy — on its
+// queue name, its device URI, or its driver identity — before the agent will
+// offer it as a label printer. Upstream offered EVERY queue, which put the
+// station's office laser on `/available` labelled "Zebra Technologies" and
+// made it the default target for raw ZPL. The pattern names Zebra by brand,
+// by language, by its Windows driver family, and by the model prefixes its
+// desktop and industrial lines carry (ZD621, ZT411, ZQ520, …). Override with
+// `--printer-match`; `.` admits everything.
+const defaultPrinterMatch = `(?i)zebra|zpl|zdesigner|\bz[dtqmpe]\d{3}`
 
 const (
 	// connectionUSB / connectionNetwork are the two transports the wire Device
@@ -136,6 +148,49 @@ func discoverPrinters(ctx context.Context, cups *cupsClient) ([]printer, error) 
 		}
 	}
 	return append(usb, network...), nil
+}
+
+// printerMatcher decides which discovered queues are label printers this agent
+// may drive. Name and URI are free; the driver identity costs an `lpoptions`
+// fork, so it is consulted only when the cheap fields did not already match
+// and is cached by the driver checker.
+type printerMatcher struct {
+	pattern *regexp.Regexp
+	drivers *driverChecker
+}
+
+// eligible reports whether a queue matches on name, device URI, or driver
+// identity. The URI is percent-decoded first so "Zebra%20Technologies" reads
+// as the words it is; a URI that fails to decode is matched raw.
+func (m *printerMatcher) eligible(ctx context.Context, candidate printer) bool {
+	if m == nil || m.pattern == nil {
+		return true
+	}
+	if m.pattern.MatchString(candidate.Queue) {
+		return true
+	}
+	uri := candidate.DeviceURI
+	if decoded, err := url.PathUnescape(uri); err == nil {
+		uri = decoded
+	}
+	if m.pattern.MatchString(uri) {
+		return true
+	}
+	if m.drivers == nil {
+		return false
+	}
+	return m.pattern.MatchString(m.drivers.model(ctx, candidate.Queue))
+}
+
+// filter keeps the eligible printers, preserving order.
+func (m *printerMatcher) filter(ctx context.Context, printers []printer) []printer {
+	kept := make([]printer, 0, len(printers))
+	for _, candidate := range printers {
+		if m.eligible(ctx, candidate) {
+			kept = append(kept, candidate)
+		}
+	}
+	return kept
 }
 
 // matchPrinter finds the printer a /write body names, by uid first and display

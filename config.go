@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"regexp"
 	"strconv"
 )
 
@@ -35,11 +36,13 @@ const (
 // fallback would only keep a stale variable working long enough to be
 // forgotten about.
 var (
-	bindEnvVar        = envPrefix + "_BIND"
-	portEnvVar        = envPrefix + "_PORT"
-	httpsPortEnvVar   = envPrefix + "_HTTPS_PORT"
-	certDirEnvVar     = envPrefix + "_CERT_DIR"
-	originAllowEnvVar = envPrefix + "_ORIGIN_ALLOW"
+	bindEnvVar         = envPrefix + "_BIND"
+	portEnvVar         = envPrefix + "_PORT"
+	httpsPortEnvVar    = envPrefix + "_HTTPS_PORT"
+	certDirEnvVar      = envPrefix + "_CERT_DIR"
+	originAllowEnvVar  = envPrefix + "_ORIGIN_ALLOW"
+	originsFileEnvVar  = envPrefix + "_ORIGINS_FILE"
+	printerMatchEnvVar = envPrefix + "_PRINTER_MATCH"
 )
 
 // Package wiring, not station configuration: the launcher resolves the
@@ -51,16 +54,27 @@ var logPathEnvVar = envPrefix + "_LOG_PATH"
 // configurable — the agent discovers queues from CUPS, unlike the dev shim's
 // hand-listed queue names.
 type config struct {
-	Bind        string
-	Port        int
-	HTTPSPort   int
-	CertDir     string
-	OriginAllow []string
+	Bind         string
+	Port         int
+	HTTPSPort    int
+	CertDir      string
+	OriginAllow  []string
+	OriginsFile  string
+	PrinterMatch *regexp.Regexp
 }
 
 // certPaths returns the cert/key pair the HTTPS listener needs.
 func (c config) certPaths() (string, string) {
 	return filepath.Join(c.CertDir, certFileName), filepath.Join(c.CertDir, keyFileName)
+}
+
+// agentOptions is the slice of the config the request handler needs.
+func (c config) agentOptions() agentOptions {
+	return agentOptions{
+		OriginAllow:  c.OriginAllow,
+		OriginsFile:  c.OriginsFile,
+		PrinterMatch: c.PrinterMatch,
+	}
 }
 
 // parseConfig resolves flags over environment defaults. A flag always wins over
@@ -73,6 +87,8 @@ func parseConfig(args []string, env func(string) string, output io.Writer) (conf
 		CertDir:   envString(env, certDirEnvVar, defaultCertDir(env)),
 	}
 	originAllow := env(originAllowEnvVar)
+	originsFile := env(originsFileEnvVar)
+	printerMatch := envString(env, printerMatchEnvVar, defaultPrinterMatch)
 
 	flags := flag.NewFlagSet(productName, flag.ContinueOnError)
 	flags.SetOutput(output)
@@ -84,9 +100,15 @@ func parseConfig(args []string, env func(string) string, output io.Writer) (conf
 	flags.StringVar(&defaults.CertDir, "cert-dir", defaults.CertDir,
 		"directory holding "+certFileName+" and "+keyFileName)
 	flags.StringVar(&originAllow, "origin-allow", originAllow,
-		"comma-separated Origin allowlist; when set, a /write from any other "+
-			"origin is rejected before any lp call. Unset means every origin is "+
-			"logged and allowed")
+		"comma-separated Origin allowlist for /write and /print-pdf; merged with "+
+			"the origins file. With neither configured every print request is "+
+			"refused; a lone * allows every origin")
+	flags.StringVar(&originsFile, "origins-file", originsFile,
+		"file with one allowed origin per line, re-read when it changes "+
+			"(default: "+originsFileName+" in --cert-dir)")
+	flags.StringVar(&printerMatch, "printer-match", printerMatch,
+		"regexp a CUPS queue's name, device URI or driver identity must match to "+
+			"be offered as a label printer; use . to offer every queue")
 	if err := flags.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -97,6 +119,18 @@ func parseConfig(args []string, env func(string) string, output io.Writer) (conf
 		return config{}, fmt.Errorf("invalid --https-port %d", defaults.HTTPSPort)
 	}
 	defaults.OriginAllow = parseOriginAllow(originAllow)
+	if originsFile == "" {
+		originsFile = filepath.Join(defaults.CertDir, originsFileName)
+	}
+	defaults.OriginsFile = originsFile
+	if printerMatch == "" {
+		printerMatch = defaultPrinterMatch
+	}
+	pattern, err := regexp.Compile(printerMatch)
+	if err != nil {
+		return config{}, fmt.Errorf("invalid --printer-match %q: %w", printerMatch, err)
+	}
+	defaults.PrinterMatch = pattern
 	return defaults, nil
 }
 

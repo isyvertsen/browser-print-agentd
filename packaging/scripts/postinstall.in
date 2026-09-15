@@ -201,10 +201,35 @@ else
 fi
 
 /bin/mkdir -p "$CERT_DIR" "$LOG_DIR"
+
+# The per-account origin allowlist. Nothing may print until an origin is in
+# here (or passed as --origin-allow in the plist). An unattended install can
+# seed it through __ORIGIN_ALLOW_ENV__ as a comma-separated list; otherwise a
+# commented template is written so the operator finds the file and its format
+# without reading the runbook. An existing file is never touched.
+ORIGINS_FILE="$CERT_DIR/__ORIGINS_FILE_NAME__"
+if [ ! -e "$ORIGINS_FILE" ]; then
+	seed="${__ORIGIN_ALLOW_ENV__:-}"
+	{
+		printf '# Origins allowed to print through this agent, one per line.\n'
+		printf '# Example:  https://labels.example.com\n'
+		printf '# A lone * allows every origin (upstream behaviour; not recommended).\n'
+		printf '# The running agent re-reads this file when it changes.\n'
+		if [ -n "$seed" ]; then
+			printf '%s\n' "$seed" | /usr/bin/tr ',' '\n' | /usr/bin/sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d'
+		fi
+	} >"$ORIGINS_FILE"
+	if [ -n "$seed" ]; then
+		log "seeded $ORIGINS_FILE from __ORIGIN_ALLOW_ENV__"
+	else
+		log "wrote an empty $ORIGINS_FILE — add the web app's origin before printing"
+	fi
+fi
+
 /usr/sbin/chown -R "$TARGET_UID:$TARGET_GID" "$CERT_DIR" "$LOG_DIR"
 /bin/chmod 700 "$CERT_DIR"
 /bin/chmod 700 "$LOG_DIR"
-/bin/chmod 600 "$KEY_FILE"
+/bin/chmod 600 "$KEY_FILE" "$ORIGINS_FILE"
 /bin/chmod 644 "$CERT_FILE"
 # Existing ring members may come from an upgrade. Ownership is installed here;
 # the daemon validates type, size, ordering, and mode before its first write.
@@ -289,6 +314,7 @@ else
 	log "station cert trust established and verified"
 fi
 
+log "allow your web app to print: add its origin to $ORIGINS_FILE"
 log "verify by hand with: curl http://localhost:$HTTP_PORT/available"
 log "Safari path: curl https://localhost:9101/available"
 log "uninstall with: sudo $UNINSTALLER"

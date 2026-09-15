@@ -235,10 +235,29 @@ that warning; re-running the installer is the supported repair.
 
 ### Per-station configuration
 
-`/Library/LaunchAgents/io.github.isyvertsen.browser-print-agentd.plist` is the only
-configuration surface. Ports and bind address live in `ProgramArguments`; to lock the print routes
-(`/write` and `/print-pdf`) to one origin, append two more strings — `--origin-allow` and the
-allowed origin — then reload:
+There are two configuration surfaces, and the one an operator touches needs no admin rights.
+
+**The origin allowlist** lives at
+`~/Library/Application Support/browser-print-agentd/allowed-origins.txt`, one origin per line,
+`#` comments allowed. `postinstall` writes a commented, empty template there — or seeds it from
+`BROWSER_PRINT_AGENTD_ORIGIN_ALLOW` in the installer's environment for an unattended install.
+**Nothing prints until an origin is in it.** The agent re-reads the file within a couple of seconds
+of a change, so adding the web app is:
+
+```bash
+echo 'https://labels.example.com' >> ~/Library/Application\ Support/browser-print-agentd/allowed-origins.txt
+curl -s http://127.0.0.1:9100/health | grep -o '"originPosture":"[^"]*"'   # expect "allowlist"
+```
+
+A lone `*` in the file restores upstream's allow-everything posture. Do not do that on a station
+that browses the web.
+
+**The LaunchAgent plist**, `/Library/LaunchAgents/io.github.isyvertsen.browser-print-agentd.plist`,
+is root-owned and holds everything else in `ProgramArguments`: ports, bind address, an optional
+static `--origin-allow` list that merges with the file, `--origins-file` to move the file, and
+`--printer-match` to change which CUPS queues count as label printers (a regexp over queue name,
+device URI and driver identity; the default matches Zebra, and `.` offers every queue). After an
+edit, reload:
 
 ```bash
 sudo launchctl bootout gui/$(id -u)/io.github.isyvertsen.browser-print-agentd
@@ -247,9 +266,7 @@ sudo launchctl bootstrap gui/$(id -u) \
 ```
 
 Every flag also has an environment mirror (`BROWSER_PRINT_AGENTD_BIND`, `…_PORT`, `…_HTTPS_PORT`,
-`…_CERT_DIR`, `…_ORIGIN_ALLOW`); a flag always wins. Leaving `--origin-allow` out is the default
-posture: every origin is **logged and allowed**. Which printer to use is not configurable at all —
-the agent discovers queues from CUPS.
+`…_CERT_DIR`, `…_ORIGIN_ALLOW`, `…_ORIGINS_FILE`, `…_PRINTER_MATCH`); a flag always wins.
 
 ### Adding a printer queue
 

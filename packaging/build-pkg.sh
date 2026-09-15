@@ -236,6 +236,8 @@ render_template() {
 		-e "s|__ENV_PREFIX__|$ENV_PREFIX|g" \
 		-e "s|__TARGET_USER_ENV__|$TARGET_USER_ENV|g" \
 		-e "s|__LOG_PATH_ENV__|$LOG_PATH_ENV|g" \
+		-e "s|__ORIGIN_ALLOW_ENV__|$ORIGIN_ALLOW_ENV|g" \
+		-e "s|__ORIGINS_FILE_NAME__|$ORIGINS_FILE_NAME|g" \
 		-e "s|__TEMP_PREFIX__|$TEMP_PREFIX|g" \
 		-e "s|__COMPONENT_PKG_NAME__|$COMPONENT_PKG_NAME|g" \
 		-e "s|__UNINSTALL_TITLE__|$UNINSTALL_TITLE|g" \

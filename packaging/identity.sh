@@ -51,6 +51,13 @@ LOG_FILE_NAME="agent.log"
 ENV_PREFIX="BROWSER_PRINT_AGENTD"
 TARGET_USER_ENV="${ENV_PREFIX}_TARGET_USER"
 LOG_PATH_ENV="${ENV_PREFIX}_LOG_PATH"
+# Doubles as the agent's own flag mirror and as the installer's seed for the
+# per-account allowlist file, so one variable configures both paths.
+ORIGIN_ALLOW_ENV="${ENV_PREFIX}_ORIGIN_ALLOW"
+
+# The per-account origin allowlist, next to the cert pair. Mirrors
+# `originsFileName` in origins.go.
+ORIGINS_FILE_NAME="allowed-origins.txt"
 
 # mktemp/log identity. TEMP_PREFIX is intentionally shorter than PRODUCT_NAME:
 # it is the shared prefix for every temp file the product creates, including the

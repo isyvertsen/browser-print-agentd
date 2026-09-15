@@ -100,9 +100,19 @@ strings would test the parsers against fiction.
 
 ## Discovery And Stable Identity
 
-`[[discovery.go#discoverPrinters]]` enumerates the station's queues from `lpstat -v` and orders
-them USB first, then network, each tier keeping CUPS's own order — the priority a hand-written
-queue list would otherwise have to supply.
+`[[discovery.go#discoverPrinters]]` enumerates the station's queues from `lpstat -v`, USB first
+then network, and `[[discovery.go#printerMatcher]]` keeps only the queues that look like label
+printers.
+
+Upstream offered every queue. On a real station that put the office laser on `/available`,
+labelled "Zebra Technologies" because the wire `Device` hardcodes the manufacturer, and made it
+the default `/write` target: a page that named no device spooled raw ZPL into a laser. The fork
+requires a match against `--printer-match` — by default Zebra's brand, `ZPL`, the `ZDesigner`
+driver family, or a model prefix such as `ZD621` — on the queue name, the percent-decoded device
+URI, or, only when those said nothing, the driver identity `lpoptions` publishes, which the driver
+checker already caches for the orientation verdict. An ineligible queue is invisible to every
+route but `/health`, which reports it with `eligible: false` so "why is my printer missing" has
+one place to look. `.` restores upstream's behaviour on purpose.
 
 Each `lpstat -v` row is `device for <queue>: <uri>` with NO `direct`/`network` class prefix; that
 prefix only exists in `lpinfo -v`, which enumerates devices rather than queues, so
@@ -249,12 +259,21 @@ auditable rather than silent.
 
 `[[log.go#agentLogger#request]]` records the `Origin` of every request, and
 `[[log.go#agentLogger#job]]` records each job's outcome with the device uid, byte count, `lp`
-request id, and origin — the minimal audit trail v1 commits to. `--origin-allow` takes an optional
-comma-separated allowlist
-(`[[server.go#parseOriginAllow]]`); when it is configured,
-`[[server.go#agent#originAllowed]]` rejects a print request from any other origin — including one
-with no `Origin` header — before any `lp` call runs, and logs the rejection. Unconfigured, the
-default, every origin is logged and allowed. This is additive to CORS and never changes a
+request id, and origin — the minimal audit trail v1 commits to. The allowlist is the union of
+`--origin-allow` (`[[server.go#parseOriginAllow]]`) and the per-account file
+`[[origins.go#originPolicy]]` re-reads when its size or mtime moves, so an operator adds their web
+app without root and without a restart. `[[origins.go#originPolicy#allowed]]` rejects a print
+request from any other origin — including one with no `Origin` header — before any `lp` call
+runs, and logs the rejection.
+
+The fork inverts upstream's default. Upstream logged and allowed every origin until someone
+configured a list; here nothing prints until someone does, and the refusal body names the file to
+edit. The reasoning is the one upstream itself gave for having an allowlist at all — any page the
+operator visits can reach the loopback surface — carried to its conclusion: a default that is
+only auditable is not a control. `*` is the explicit, written-down way back to allow-all. Read
+routes stay open under every posture, and the Chromium private-network grant follows the same
+split (`[[server.go#printRoute]]`), so a page that may not print can still discover the agent
+and tell the operator what to configure. This is additive to CORS and never changes an allowed
 caller's own successful path.
 
 Both write-capable routes go through the one gate. `[[server.go#agent#enforceOrigin]]` is what

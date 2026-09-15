@@ -23,9 +23,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 const (
@@ -295,18 +297,34 @@ func twoPrinterCUPS(usbState string, netState string) *fakeCUPS {
 }
 
 // startAgent boots the agent over the fake CUPS on an ephemeral loopback port
-// and returns the base URL plus the log buffer.
+// and returns the base URL plus the log buffer. A nil allowlist selects
+// allow-all, because most tests are about printing rather than posture and
+// the product default (deny everything) would fail every one of them for the
+// wrong reason; the posture tests configure it explicitly.
 func startAgent(t *testing.T, fake *fakeCUPS, originAllow []string) (string, *bytes.Buffer) {
 	t.Helper()
+	if originAllow == nil {
+		originAllow = []string{allowAllOrigins}
+	}
+	base, logs, _ := startAgentWith(t, fake, agentOptions{OriginAllow: originAllow})
+	return base, logs
+}
+
+// startAgentWith boots the agent with the full option set and also hands back
+// the handler so a test can reach the policy and cache internals.
+func startAgentWith(
+	t *testing.T, fake *fakeCUPS, options agentOptions,
+) (string, *bytes.Buffer, *agent) {
+	t.Helper()
 	logs := &bytes.Buffer{}
-	handler := newAgent(fake, newAgentLogger(logs), originAllow)
+	handler := newAgent(fake, newAgentLogger(logs), options)
 	// No caching in tests: each assertion probes the fake's current state. The
 	// driver cache is disabled for the same reason and tested on its own.
 	handler.health.ttl = 0
 	handler.drivers.ttl = 0
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	return server.URL, logs
+	return server.URL, logs, handler
 }
 
 // postWrite issues a /write with an optional Origin header.
@@ -1419,19 +1437,47 @@ func TestOriginPostureGatesWrite(t *testing.T) {
 		t.Fatalf("lp calls = %v, want one for the allowed origin", fake.calls())
 	}
 
-	// Default (unconfigured) posture: the same request is logged and ALLOWED.
+	// Default (unconfigured) posture: nothing may print, and the refusal says
+	// where to configure it. Read routes still answer so the page can tell the
+	// operator what to do.
 	fake = twoPrinterCUPS(stateEnabled, stateEnabled)
-	base, logs = startAgent(t, fake, nil)
+	base, logs, handler := startAgentWith(t, fake, agentOptions{})
+	status, body = postWrite(t, base, "https://evil.example", job)
+	if status != http.StatusForbidden {
+		t.Fatalf("/write in default posture = %d body %q, want 403", status, body)
+	}
+	if !strings.Contains(body, "no origin is allowed") ||
+		!strings.Contains(body, "--origin-allow") {
+		t.Fatalf("default refusal body = %q, want the configuration hint", body)
+	}
+	if len(fake.calls()) != 0 {
+		t.Fatalf("lp calls = %v, want none in default posture", fake.calls())
+	}
+	if !strings.Contains(logs.String(), "origin-not-allowed") {
+		t.Fatalf("logs = %q, want the refusal recorded", logs.String())
+	}
+	if handler.origins.posture() != postureDeny {
+		t.Fatalf("posture = %q, want %q", handler.origins.posture(), postureDeny)
+	}
+	if status, _ := getPath(t, base, "/available"); status != http.StatusOK {
+		t.Fatalf("/available in default posture = %d, want 200", status)
+	}
+
+	// `*` is the explicit opt-in to upstream's log-and-allow.
+	fake = twoPrinterCUPS(stateEnabled, stateEnabled)
+	base, logs, handler = startAgentWith(t, fake, agentOptions{OriginAllow: []string{"*"}})
 	status, body = postWrite(t, base, "https://evil.example", job)
 	if status != http.StatusOK {
-		t.Fatalf("/write in default posture = %d body %q, want 200", status, body)
+		t.Fatalf("/write under * = %d body %q, want 200", status, body)
 	}
 	if len(fake.calls()) != 1 {
-		t.Fatalf("lp calls = %v, want one in default posture", fake.calls())
+		t.Fatalf("lp calls = %v, want one under *", fake.calls())
 	}
 	if !strings.Contains(logs.String(), "origin=https://evil.example") {
-		t.Fatalf("logs = %q, want every origin recorded in default posture",
-			logs.String())
+		t.Fatalf("logs = %q, want every origin recorded under *", logs.String())
+	}
+	if handler.origins.posture() != postureAllowAll {
+		t.Fatalf("posture = %q, want %q", handler.origins.posture(), postureAllowAll)
 	}
 
 	if got := parseOriginAllow(" https://a , https://b ,, https://a "); len(got) != 2 ||
@@ -1480,9 +1526,9 @@ func TestCORSEchoesOriginAndAnswersPreflight(t *testing.T) {
 
 // @lat: [[tests#Agent Core#Private Network Preflight Grant]]
 func TestPrivateNetworkPreflightGrant(t *testing.T) {
-	preflight := func(t *testing.T, base, origin string, ask bool) http.Header {
+	preflight := func(t *testing.T, base, path, origin string, ask bool) http.Header {
 		t.Helper()
-		request, err := http.NewRequest(http.MethodOptions, base+"/available", nil)
+		request, err := http.NewRequest(http.MethodOptions, base+path, nil)
 		if err != nil {
 			t.Fatalf("build preflight: %v", err)
 		}
@@ -1505,26 +1551,32 @@ func TestPrivateNetworkPreflightGrant(t *testing.T) {
 
 	// A Chromium preflight that asks gets the grant, without which the browser
 	// drops the GET that follows and the station reads as unreachable.
-	header := preflight(t, open, "https://lab.example", true)
+	header := preflight(t, open, "/available", "https://lab.example", true)
 	if got := header.Get("Access-Control-Allow-Private-Network"); got != "true" {
 		t.Fatalf("Allow-Private-Network = %q, want true", got)
 	}
 
 	// A preflight that never asked is not handed the grant.
-	header = preflight(t, open, "https://lab.example", false)
+	header = preflight(t, open, "/available", "https://lab.example", false)
 	if got := header.Get("Access-Control-Allow-Private-Network"); got != "" {
 		t.Fatalf("unasked Allow-Private-Network = %q, want absent", got)
 	}
 
-	// Once an allowlist is configured it governs the grant too: an origin that
-	// would be refused at /write must not be waved onto the private network.
+	// The allowlist governs the grant for the PRINT routes: an origin that
+	// would be refused at /write is not waved onto the private network there.
+	// It still gets the grant for a read, so its page can discover the agent
+	// and tell the operator the station is not yet allowed to print.
 	locked, _ := startAgent(t, twoPrinterCUPS(stateEnabled, stateEnabled),
 		[]string{"https://lab.example"})
-	header = preflight(t, locked, "https://evil.example", true)
+	header = preflight(t, locked, "/write", "https://evil.example", true)
 	if got := header.Get("Access-Control-Allow-Private-Network"); got != "" {
-		t.Fatalf("disallowed origin Allow-Private-Network = %q, want absent", got)
+		t.Fatalf("disallowed origin Allow-Private-Network for /write = %q, want absent", got)
 	}
-	header = preflight(t, locked, "https://lab.example", true)
+	header = preflight(t, locked, "/available", "https://evil.example", true)
+	if got := header.Get("Access-Control-Allow-Private-Network"); got != "true" {
+		t.Fatalf("disallowed origin Allow-Private-Network for /available = %q, want true", got)
+	}
+	header = preflight(t, locked, "/write", "https://lab.example", true)
 	if got := header.Get("Access-Control-Allow-Private-Network"); got != "true" {
 		t.Fatalf("allowed origin Allow-Private-Network = %q, want true", got)
 	}
@@ -1604,7 +1656,29 @@ func TestConfigResolvesFlagsOverEnvironment(t *testing.T) {
 		t.Fatalf("defaults = %+v", bare)
 	}
 	if len(bare.OriginAllow) != 0 {
-		t.Fatalf("default allowlist = %v, want log-and-allow", bare.OriginAllow)
+		t.Fatalf("default allowlist = %v, want empty (deny until configured)", bare.OriginAllow)
+	}
+	// The origins file sits next to the cert pair by default, and the printer
+	// match is the Zebra pattern until a station says otherwise.
+	if filepath.Dir(bare.OriginsFile) != bare.CertDir ||
+		filepath.Base(bare.OriginsFile) != originsFileName {
+		t.Fatalf("default origins file = %q, want %s in %s",
+			bare.OriginsFile, originsFileName, bare.CertDir)
+	}
+	if bare.PrinterMatch == nil || bare.PrinterMatch.String() != defaultPrinterMatch {
+		t.Fatalf("default printer match = %v, want %q", bare.PrinterMatch, defaultPrinterMatch)
+	}
+	custom, err := parseConfig([]string{"--printer-match", "^label_", "--origins-file", "/tmp/o.txt"},
+		func(string) string { return "" }, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseConfig custom: %v", err)
+	}
+	if custom.PrinterMatch.String() != "^label_" || custom.OriginsFile != "/tmp/o.txt" {
+		t.Fatalf("custom config = %+v", custom)
+	}
+	if _, err := parseConfig([]string{"--printer-match", "("},
+		func(string) string { return "" }, &bytes.Buffer{}); err == nil {
+		t.Fatalf("parseConfig accepted an invalid --printer-match")
 	}
 	// The product directory name is asserted by shape, not by literal: the pair
 	// must land side by side under the operator's per-user Application Support
@@ -1709,8 +1783,191 @@ func TestVersionSurfacesOnHealthAndEveryResponse(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &empty); err != nil {
 		t.Fatalf("decode /health: %v (body %q)", err, body)
 	}
-	if empty.Version != version || empty.OriginPosture != posturelogAndAllow ||
+	if empty.Version != version || empty.OriginPosture != postureAllowAll ||
 		len(empty.Printers) != 0 {
 		t.Fatalf("/health with no queues = %+v", empty)
+	}
+}
+
+// A station's office printer must never be offered as a label printer: it is
+// not Zebra, and raw ZPL into it is a page of garbage. The match runs on the
+// queue name, the percent-decoded device URI, and — only when those said
+// nothing — the driver identity from lpoptions.
+func TestDiscoveryOffersOnlyLabelPrinters(t *testing.T) {
+	const (
+		laserQueue = "Brother_DCP_7070DW"
+		laserURI   = "dnssd://Brother%20DCP-7070DW._pdl-datastream._tcp.local./?bidi"
+		plainQueue = "labels_back_office"
+		plainURI   = "socket://192.0.2.50:9100"
+	)
+	fake := &fakeCUPS{
+		devices: []queueDevice{
+			{Queue: laserQueue, URI: laserURI},
+			{Queue: plainQueue, URI: plainURI},
+			{Queue: usbQueue, URI: usbURI},
+		},
+		states: map[string]string{
+			laserQueue: stateEnabled, plainQueue: stateEnabled, usbQueue: stateEnabled,
+		},
+		models: map[string]string{
+			laserQueue: "Brother DCP-7070DW CUPS",
+			plainQueue: zplModel,
+		},
+	}
+	base, _, _ := startAgentWith(t, fake, agentOptions{OriginAllow: []string{"*"}})
+
+	var payload struct {
+		Printer []wireDevice `json:"printer"`
+	}
+	_, body := getPath(t, base, "/available")
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("decode /available %q: %v", body, err)
+	}
+	names := make([]string, 0, len(payload.Printer))
+	for _, device := range payload.Printer {
+		names = append(names, device.Name)
+	}
+	// The USB Zebra matches on its URI, the plain-named socket queue only on
+	// its driver identity, and the laser on nothing.
+	if len(names) != 2 || names[0] != usbQueue || names[1] != plainQueue {
+		t.Fatalf("/available = %v, want [%s %s]", names, usbQueue, plainQueue)
+	}
+
+	// The laser is not even a fallback target: with the Zebra queues gone the
+	// job fails loudly rather than landing on the wrong printer.
+	fake.states[usbQueue] = stateDisabled
+	fake.states[plainQueue] = stateDisabled
+	status, body := postWrite(t, base, "https://lab.example", map[string]any{"data": "^XA^XZ"})
+	if status != http.StatusInternalServerError || !strings.Contains(body, "no printer") {
+		t.Fatalf("/write with only the laser healthy = %d %q, want a loud failure", status, body)
+	}
+	if len(fake.calls()) != 0 {
+		t.Fatalf("lp calls = %v, want none for a non-label printer", fake.calls())
+	}
+
+	// /health still lists it, flagged ineligible, because that is where "why
+	// is my printer missing" gets answered.
+	_, body = getPath(t, base, "/health")
+	var report healthReport
+	if err := json.Unmarshal([]byte(body), &report); err != nil {
+		t.Fatalf("decode /health: %v (body %q)", err, body)
+	}
+	eligible := map[string]bool{}
+	for _, listed := range report.Printers {
+		eligible[listed.Queue] = listed.Eligible
+	}
+	if len(report.Printers) != 3 || eligible[laserQueue] || !eligible[usbQueue] || !eligible[plainQueue] {
+		t.Fatalf("/health eligibility = %v, want only the laser ineligible", eligible)
+	}
+	if report.PrinterMatch != defaultPrinterMatch {
+		t.Fatalf("/health printerMatch = %q, want %q", report.PrinterMatch, defaultPrinterMatch)
+	}
+
+	// `.` is the documented way back to upstream's offer-everything behaviour.
+	fake.states[usbQueue] = stateEnabled
+	base, _, _ = startAgentWith(t, fake, agentOptions{
+		OriginAllow:  []string{"*"},
+		PrinterMatch: regexp.MustCompile("."),
+	})
+	_, body = getPath(t, base, "/available")
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("decode /available %q: %v", body, err)
+	}
+	if len(payload.Printer) != 2 {
+		t.Fatalf("/available with --printer-match . = %+v, want every healthy queue", payload.Printer)
+	}
+}
+
+// The allowlist file is the no-root configuration surface: an operator adds
+// their web app's origin to a file in their own Application Support directory
+// and the running agent picks it up without a restart.
+func TestOriginsFileIsReadAndReloaded(t *testing.T) {
+	job := map[string]any{"data": "^XA^XZ"}
+	originsFile := filepath.Join(t.TempDir(), originsFileName)
+	fake := twoPrinterCUPS(stateEnabled, stateEnabled)
+	base, _, handler := startAgentWith(t, fake, agentOptions{OriginsFile: originsFile})
+
+	// The stat cache would otherwise hide a rewrite made within the TTL.
+	expire := func() {
+		handler.origins.mu.Lock()
+		handler.origins.checked = time.Time{}
+		handler.origins.mu.Unlock()
+	}
+
+	// Absent file: deny, and the refusal names the file to create.
+	status, body := postWrite(t, base, "https://lab.example", job)
+	if status != http.StatusForbidden || !strings.Contains(body, originsFile) {
+		t.Fatalf("/write with no origins file = %d %q, want 403 naming %s", status, body, originsFile)
+	}
+
+	// Comments and blank lines are ignored; the listed origin prints.
+	if err := os.WriteFile(originsFile,
+		[]byte("# stations print from the lab app\n\nhttps://lab.example   # prod\n"), 0o600); err != nil {
+		t.Fatalf("write origins file: %v", err)
+	}
+	expire()
+	if status, body = postWrite(t, base, "https://lab.example", job); status != http.StatusOK {
+		t.Fatalf("/write after adding the origin = %d %q, want 200", status, body)
+	}
+	if status, _ = postWrite(t, base, "https://evil.example", job); status != http.StatusForbidden {
+		t.Fatalf("/write from an unlisted origin = %d, want 403", status)
+	}
+	if got := handler.origins.effective(); len(got) != 1 || got[0] != "https://lab.example" {
+		t.Fatalf("effective allowlist = %v", got)
+	}
+
+	// A rewrite is noticed by size/mtime, and the static list merges with it.
+	if err := os.WriteFile(originsFile, []byte("https://other.example\n"), 0o600); err != nil {
+		t.Fatalf("rewrite origins file: %v", err)
+	}
+	expire()
+	if status, _ = postWrite(t, base, "https://lab.example", job); status != http.StatusForbidden {
+		t.Fatalf("/write after the origin was removed = %d, want 403", status)
+	}
+	if status, _ = postWrite(t, base, "https://other.example", job); status != http.StatusOK {
+		t.Fatalf("/write from the new origin = %d, want 200", status)
+	}
+
+	// A lone * in the file opts the station into allow-all, and /health says so.
+	if err := os.WriteFile(originsFile, []byte("*\n"), 0o600); err != nil {
+		t.Fatalf("rewrite origins file: %v", err)
+	}
+	expire()
+	if status, _ = postWrite(t, base, "https://anything.example", job); status != http.StatusOK {
+		t.Fatalf("/write under a * file = %d, want 200", status)
+	}
+	_, body = getPath(t, base, "/health")
+	var report healthReport
+	if err := json.Unmarshal([]byte(body), &report); err != nil {
+		t.Fatalf("decode /health: %v", err)
+	}
+	if report.OriginPosture != postureAllowAll || report.OriginsFile != originsFile {
+		t.Fatalf("/health posture = %q file %q", report.OriginPosture, report.OriginsFile)
+	}
+}
+
+// The private-network grant on the preflight follows the same split as the
+// routes: a page that may not print still gets to read.
+func TestPreflightGrantsPrivateNetworkForReadsOnly(t *testing.T) {
+	base, _, _ := startAgentWith(t, twoPrinterCUPS(stateEnabled, stateEnabled), agentOptions{})
+	preflight := func(path string) string {
+		request, err := http.NewRequest(http.MethodOptions, base+path, nil)
+		if err != nil {
+			t.Fatalf("build preflight: %v", err)
+		}
+		request.Header.Set("Origin", "https://lab.example")
+		request.Header.Set("Access-Control-Request-Private-Network", "true")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("preflight %s: %v", path, err)
+		}
+		response.Body.Close()
+		return response.Header.Get("Access-Control-Allow-Private-Network")
+	}
+	if got := preflight("/available"); got != "true" {
+		t.Fatalf("PNA grant for /available in deny posture = %q, want true", got)
+	}
+	if got := preflight("/write"); got != "" {
+		t.Fatalf("PNA grant for /write in deny posture = %q, want none", got)
 	}
 }

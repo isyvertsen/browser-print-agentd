@@ -19,7 +19,7 @@ name the wire contract this agent emulates.
 **This is a fork.** The original is
 [sharaf-nassar/browser-print-agentd](https://github.com/sharaf-nassar/browser-print-agentd) by
 Sharaf Nassar, MIT licensed, and the wire contract, CUPS spooling, health-gated failover and
-origin posture are all upstream's work. This fork, maintained by Ivar Syvertsen, differs in two
+origin posture are all upstream's work. This fork, maintained by Ivar Syvertsen, differs in four
 deliberate ways:
 
 - **No automatic updater.** Upstream ships a root LaunchDaemon that downloads and installs
@@ -28,6 +28,12 @@ deliberate ways:
 - **The installer never removes other software.** Upstream's `preinstall` deleted Zebra Browser
   Print by path glob, as root. Here it refuses to install while another agent holds ports
   9100/9101 and tells you to quit or uninstall that program yourself.
+- **No page may print until you allow it.** Upstream allowed every origin by default and only
+  logged. Here the default is deny, and the allowlist is a plain file in your own Application
+  Support directory that the agent re-reads when it changes.
+- **Only label printers are offered.** Upstream listed every CUPS queue as a Zebra printer, office
+  laser included, and would spool raw ZPL to it. Here a queue has to match `--printer-match`
+  (Zebra by default) on its name, device URI or driver.
 
 The bundle id, launchd label and package identifier are `io.github.isyvertsen.…`, so this fork
 and upstream never overwrite each other's install receipts.
@@ -116,11 +122,30 @@ Nothing runs as root after the installer exits, and nothing on the machine has n
 
 ## Configuration
 
-**Configuration** is by flag, with an environment mirror for each:
-`--bind`, `--port`, `--https-port`, `--cert-dir`, `--origin-allow`, mirrored by
-`BROWSER_PRINT_AGENTD_BIND`, `_PORT`, `_HTTPS_PORT`, `_CERT_DIR`, and `_ORIGIN_ALLOW`. A flag
-always wins over its environment mirror, which always wins over the built-in default. Printer
-selection is deliberately **not** configurable — queues come from CUPS.
+**Which pages may print** is the one thing you have to configure. Nothing may print until an
+origin is allowed. Add your web app's origin — scheme and host, no path — to
+`~/Library/Application Support/browser-print-agentd/allowed-origins.txt`, one per line:
+
+```text
+https://labels.example.com
+```
+
+The running agent picks the change up within a couple of seconds; no restart, no admin
+password. A lone `*` allows every origin, which is what upstream did by default and is not
+recommended. The same list can be passed as `--origin-allow https://a,https://b` in the
+LaunchAgent plist, or seeded at install time by setting `BROWSER_PRINT_AGENTD_ORIGIN_ALLOW` in
+the installer's environment. Read routes (`/available`, `/default`, `/health`) always answer, so a
+page can tell you the agent is present but not yet allowed.
+
+**Which queues are label printers** is decided by `--printer-match`, a regular expression tested
+against each CUPS queue's name, device URI and driver identity. The default matches Zebra by
+brand, language (`ZPL`), driver family (`ZDesigner`) and model prefix (`ZD621`, `ZT411`, …), so
+the office laser never appears on `/available` and never receives raw ZPL. Pass `--printer-match .`
+to offer every queue; `GET /health` shows each queue's `eligible` verdict.
+
+Everything else: `--bind`, `--port`, `--https-port`, `--cert-dir`, `--origins-file`, each with an
+environment mirror (`BROWSER_PRINT_AGENTD_BIND` and so on). A flag always wins over its
+environment mirror, which always wins over the built-in default.
 
 The agent does not create CUPS queues for you. Add the printer once with `lpadmin`
 (`-m drv:///sample.drv/zebra.ppd`; `lpadmin -m raw` no longer exists on macOS).
@@ -220,9 +245,15 @@ bridge between the local browser and local CUPS, never a network service.
 is reported: the `Device` shape must never grow a version field, because callers parse and pin
 it. A binary built any way other than a tagged release reports `dev`.
 
-**Origin posture.** With no `--origin-allow` configured the agent is `log-and-allow`: every
-origin is recorded and permitted. Configure an allowlist and both print routes — `/write` and
-`/print-pdf` — reject any other origin with `403` *before* any CUPS work happens.
+**Origin posture.** Deny until configured. Both print routes — `/write` and `/print-pdf` —
+reject any origin not on the allowlist with a `403` that names the file to edit, *before* any
+CUPS work happens. The allowlist is the union of `--origin-allow` and the per-user
+`allowed-origins.txt`; `*` allows all. The Chromium private-network preflight grant follows the
+same split: always granted for reads, granted for print routes only to an allowed origin.
+
+**Printer eligibility.** Only queues matching `--printer-match` are discovered, health-checked,
+offered, or used as a failover target. An ineligible queue appears on `/health` with
+`"eligible": false` and nowhere else.
 
 ## License
 
