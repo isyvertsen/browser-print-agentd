@@ -639,6 +639,11 @@ curl -fsS http://127.0.0.1:9100/health
 | 200 and healthy, and the caller says "Sent" | The job reached CUPS; the failure is past the agent             | [The job left, no label](#the-job-left-but-no-label) |
 | A label printed, but upside down            | The queue's driver flips the page and was not recognised        | [Upside down](#a-pdf-label-prints-upside-down)       |
 
+**Start with the status page** when a person is at the Mac: <http://127.0.0.1:9100/> says in
+one line whether labels can print and to which queue, lists every queue with the reason it will
+or will not be used, shows the allowed sites with a form to allow or remove one, and the recent
+log. Everything below is the same information for a terminal.
+
 `GET /health` is always the first call. Unlike `/available`, which hides unhealthy printers so a
 caller can never pin one, `/health` lists **every** discovered queue with its verdict, and it
 answers 200 even when CUPS itself is unreachable. The same version rides every response as the

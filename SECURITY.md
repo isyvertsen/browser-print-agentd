@@ -18,6 +18,12 @@ talk to it, what it will send to which printer, and what runs as root on the mac
   whose public half is in `packaging/allowed_signers`, never the server it downloads from.
 - **The installer never removes other software.** It refuses to install while another agent
   holds ports 9100/9101.
+- **The status page cannot be driven by other sites.** `GET /` and its form endpoint send no
+  CORS headers, carry a `default-src 'none'` Content-Security-Policy, and refuse a form post
+  whose `Sec-Fetch-Site` is not same-origin or whose `Origin` is not this listener. A page on
+  another origin cannot read the status page or add itself to the allowlist through it. A
+  process on the same Mac can, via `curl`; that is the loopback trust boundary already assumed
+  everywhere else.
 
 ## Known limitations
 

@@ -2,7 +2,11 @@ package main
 
 import (
 	"bufio"
+	"errors"
+	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -151,6 +155,153 @@ func (p *originPolicy) refresh() {
 	p.fromFile = parseOriginsFile(handle)
 	p.modTime, p.size = info.ModTime(), info.Size()
 	p.fileState = "loaded"
+}
+
+// normalizeOrigin turns operator input into the exact string a browser sends
+// as `Origin`: lowercase scheme and host, an explicit port only when it is
+// not the scheme's default, and nothing after the host. A lone `*` is passed
+// through as the allow-all marker.
+func normalizeOrigin(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == allowAllOrigins {
+		return allowAllOrigins, nil
+	}
+	if raw == "" {
+		return "", errors.New("enter a site, like https://labels.example.com")
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return "", fmt.Errorf("%q is not a site address", raw)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", fmt.Errorf("%q must start with https:// or http://", raw)
+	}
+	if parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") ||
+		parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("%q should be just the scheme and host, with no path", raw)
+	}
+	host := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		host = host + ":" + port
+	}
+	return scheme + "://" + host, nil
+}
+
+// add appends origin to the allowlist file, creating it with a short header
+// when absent, and forces the next check to read it back.
+func (p *originPolicy) add(raw string) (string, error) {
+	origin, err := normalizeOrigin(raw)
+	if err != nil {
+		return "", err
+	}
+	if p.file == "" {
+		return "", errors.New("this agent has no allowlist file; pass --origin-allow instead")
+	}
+	lines, err := p.readLines()
+	if err != nil {
+		return "", err
+	}
+	for _, line := range lines {
+		if strings.TrimSpace(line) == origin {
+			return origin, nil
+		}
+	}
+	if len(lines) == 0 {
+		lines = []string{
+			"# Origins allowed to print through this agent, one per line.",
+			"# A lone * allows every origin (not recommended).",
+		}
+	}
+	lines = append(lines, origin)
+	return origin, p.writeLines(lines)
+}
+
+// remove deletes every line equal to origin, keeping comments and order.
+func (p *originPolicy) remove(raw string) error {
+	origin := strings.TrimSpace(raw)
+	if origin == "" || p.file == "" {
+		return nil
+	}
+	lines, err := p.readLines()
+	if err != nil {
+		return err
+	}
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		candidate := strings.TrimSpace(line)
+		if hash := strings.Index(candidate, " #"); hash >= 0 {
+			candidate = strings.TrimSpace(candidate[:hash])
+		}
+		if candidate == origin {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return p.writeLines(kept)
+}
+
+// readLines returns the file's lines verbatim, or none when it is absent.
+func (p *originPolicy) readLines() ([]string, error) {
+	data, err := os.ReadFile(p.file)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %s: %w", p.file, err)
+	}
+	if len(data) > maxOriginsFileBytes {
+		return nil, fmt.Errorf("%s is too large to edit here", p.file)
+	}
+	text := strings.TrimRight(string(data), "\n")
+	if text == "" {
+		return nil, nil
+	}
+	return strings.Split(text, "\n"), nil
+}
+
+// writeLines replaces the file atomically (temp file + rename in the same
+// directory), mode 600, and drops the stat cache so the change is live now.
+func (p *originPolicy) writeLines(lines []string) error {
+	dir := filepath.Dir(p.file)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(p.file)+".*")
+	if err != nil {
+		return fmt.Errorf("write %s: %w", p.file, err)
+	}
+	tmpPath := tmp.Name()
+	content := strings.Join(lines, "\n") + "\n"
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write %s: %w", p.file, err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write %s: %w", p.file, err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("write %s: %w", p.file, err)
+	}
+	if err := os.Rename(tmpPath, p.file); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("write %s: %w", p.file, err)
+	}
+	p.mu.Lock()
+	p.checked = time.Time{}
+	p.mu.Unlock()
+	return nil
 }
 
 // parseOriginsFile reads one origin per line, ignoring blanks and `#`

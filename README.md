@@ -247,6 +247,7 @@ them answers those paths with the plain-text `404` its default arm has always pr
 | `POST` | `/write`      | spools `{"data": "<raw ZPL>"}` to the requested (or resolved) printer; empty `200` on success, plain-text body on failure |
 | `POST` | `/read`       | empty `200` — dead surface for most callers, kept so the agent stays a drop-in                                            |
 | `GET`  | `/health`     | **additive** diagnostics: running version, origin posture, and every queue's health                                      |
+| `GET`  | `/`           | **additive**: the status page for the person at the Mac — which printer labels go to, which sites may print, recent activity, and a form to allow or remove a site. No CORS, strict CSP, same-origin form only |
 | `POST` | `/print-pdf`  | **additive**: spools `{"data": "<base64 PDF>"}` as a rendered document; same `200`/plain-text convention as `/write`      |
 
 `OPTIONS` on any path answers the CORS preflight with `204`.
@@ -281,6 +282,13 @@ same split: always granted for reads, granted for print routes only to an allowe
 **Printer eligibility.** Only queues matching `--printer-match` are discovered, health-checked,
 offered, or used as a failover target. An ineligible queue appears on `/health` with
 `"eligible": false` and nowhere else.
+
+**Status page.** Open <http://127.0.0.1:9100/> on the Mac itself. It answers "can this Mac
+print?" in one line, lists every queue with the reason it will or will not be used, lists the
+allowed sites with a form to allow or remove one (writing the same `allowed-origins.txt` the
+agent reads), and shows recent activity. It sends no CORS headers, carries a
+`default-src 'none'` CSP, and accepts its form only from itself (`Sec-Fetch-Site` and `Origin`
+both checked), so a web page on another origin can neither read it nor change the allowlist.
 
 ## License
 

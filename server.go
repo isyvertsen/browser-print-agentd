@@ -126,12 +126,19 @@ func printRoute(path string) bool {
 func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	a.logger.request(r.Method, r.URL.Path, origin)
-	setCORSHeaders(w, origin)
 
 	// Set before routing so EVERY response carries it — a 404 and a preflight
 	// included. A station whose agent is answering the wrong thing is diagnosed
 	// from the response it actually produced, which may well be the 404.
 	w.Header().Set(versionHeader, version)
+
+	// The status page is for the person at the Mac, not for web apps: it gets
+	// no CORS headers at all, so no other origin can read or drive it.
+	if uiRoute(r.URL.Path) {
+		a.serveUI(w, r)
+		return
+	}
+	setCORSHeaders(w, origin)
 
 	if r.Method == http.MethodOptions {
 		// Private Network Access. Chromium treats a public https page reaching

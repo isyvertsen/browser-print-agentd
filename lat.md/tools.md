@@ -304,6 +304,28 @@ The mechanism is daemon-owned rotation, specified in
 `[[log.go#rotatingLog]]` owns the active descriptor, normalizes the ring on startup, and performs
 the close/rename/open sequence under `[[log.go#agentLogger#write]]`'s concurrency boundary.
 
+## Status Page
+
+`[[ui.go#agent#serveUI]]` renders `/`, the one surface a person reads, from the same probes
+`/health` runs, and lets that person allow or remove a site without root or a restart.
+
+The daemon is otherwise headless, and "is it working?" was a curl call or a log file. The page
+answers the station's opening question in one printed-label line — ready and to which queue,
+ready but no site allowed yet, no label printer, or CUPS unreachable — then lists every queue
+with the reason it will or will not be used (`[[ui.go#pagePrinter]]`), the allowed sites, and
+the recent log with read requests filtered out (`[[ui.go#interestingLog]]`).
+
+Because the page can edit the allowlist, it is held outside the print API's trust model
+entirely. `[[ui.go#uiRoute]]` diverts it before `setCORSHeaders` runs, so no
+`Access-Control-Allow-Origin` is ever sent for it; a `default-src 'none'` Content-Security-Policy
+and `frame-ancestors 'none'` keep it inert; and `[[ui.go#sameOriginForm]]` accepts the form only
+when `Sec-Fetch-Site` is same-origin (or absent, as from curl) and any `Origin` header names this
+listener. Writes go through `[[origins.go#originPolicy#add]]` and `[[origins.go#originPolicy#remove]]`,
+which normalise what a person typed into what a browser sends as `Origin`
+(`[[origins.go#normalizeOrigin]]`), rewrite the file atomically, and drop the stat cache so the
+change is live before the redirect lands. Sites from `--origin-allow` are shown but not
+removable, because they live in the root-owned plist.
+
 ## Version And Health Surface
 
 `[[version.go#agent#handleHealth]]` answers `GET /health` with the running version, origin posture,
