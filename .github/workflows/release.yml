@@ -20,9 +20,9 @@
 # there instead of drifting silently against a workflow literal that still
 # predicts the old asset name.
 #
-# Every release attaches FOUR assets: the versioned installer, a byte-identical
-# copy of it under a version-free name, the installer's `.sha256`, and
-# `update-manifest.txt`. The version-free copy is the evergreen download
+# Every release attaches THREE assets: the versioned installer, a byte-identical
+# copy of it under a version-free name, and the installer's `.sha256`. The
+# version-free copy is the evergreen download
 # contract described at "Copy the notarized package to the stable download
 # name" below — it is unconditional, and no release may ship without it.
 #
@@ -189,7 +189,6 @@ jobs:
           # the stable download name" below for the contract it carries.
           echo "STABLE_PKG_PATH=$RUNNER_TEMP/release/$BINARY_NAME.pkg" >> "$GITHUB_ENV"
           echo "CHECKSUM_PATH=$RUNNER_TEMP/release/$BINARY_NAME-$VERSION.pkg.sha256" >> "$GITHUB_ENV"
-          echo "MANIFEST_PATH=$RUNNER_TEMP/release/update-manifest.txt" >> "$GITHUB_ENV"
           echo "releasing $BINARY_NAME $VERSION" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/setup-go@v6
@@ -440,16 +439,14 @@ jobs:
           fi
           echo "asset name: $ASSET"
 
-      # The updater feed is derived only after notarization, stapling, and the
-      # quarantined Gatekeeper assessment have all passed. The expected files
-      # below are independently constructed and compared byte-for-byte so a
-      # whitespace or field-name drift cannot silently change the feed format.
-      - name: Create and verify release metadata assets
+      # The checksum is derived only after notarization, stapling, and the
+      # quarantined Gatekeeper assessment have all passed, and is verified back
+      # against the package before it is published.
+      - name: Create and verify the release checksum
         run: |
           set -euo pipefail
           PKG_ASSET=$(basename "$PKG_PATH")
           CHECKSUM_ASSET=$(basename "$CHECKSUM_PATH")
-          MANIFEST_ASSET=$(basename "$MANIFEST_PATH")
           EXPECTED_PKG_ASSET="$BINARY_NAME-$VERSION.pkg"
           if [ "$PKG_ASSET" != "$EXPECTED_PKG_ASSET" ]; then
             echo "::error::package asset is $PKG_ASSET, not $EXPECTED_PKG_ASSET"
@@ -457,10 +454,6 @@ jobs:
           fi
           if [ "$CHECKSUM_ASSET" != "$EXPECTED_PKG_ASSET.sha256" ]; then
             echo "::error::checksum asset is $CHECKSUM_ASSET, not $EXPECTED_PKG_ASSET.sha256"
-            exit 1
-          fi
-          if [ "$MANIFEST_ASSET" != "update-manifest.txt" ]; then
-            echo "::error::manifest asset is $MANIFEST_ASSET, not update-manifest.txt"
             exit 1
           fi
 
@@ -471,29 +464,11 @@ jobs:
           fi
 
           printf '%s  %s\n' "$PKG_SHA256" "$PKG_ASSET" > "$CHECKSUM_PATH"
-          printf 'version=%s\nasset=%s\nsha256=%s\n' \
-            "$VERSION" "$PKG_ASSET" "$PKG_SHA256" > "$MANIFEST_PATH"
-
-          EXPECTED_CHECKSUM="$RUNNER_TEMP/expected-release.sha256"
-          EXPECTED_MANIFEST="$RUNNER_TEMP/expected-update-manifest.txt"
-          printf '%s  %s\n' "$PKG_SHA256" "$EXPECTED_PKG_ASSET" \
-            > "$EXPECTED_CHECKSUM"
-          printf 'version=%s\nasset=%s\nsha256=%s\n' \
-            "$VERSION" "$EXPECTED_PKG_ASSET" "$PKG_SHA256" \
-            > "$EXPECTED_MANIFEST"
-          if ! cmp -s "$EXPECTED_CHECKSUM" "$CHECKSUM_PATH"; then
-            echo "::error::$CHECKSUM_ASSET content does not match the package digest and asset name byte-for-byte"
-            exit 1
-          fi
           if ! (cd "$(dirname "$PKG_PATH")" && shasum -a 256 -c "$CHECKSUM_ASSET"); then
             echo "::error::$CHECKSUM_ASSET does not verify $PKG_ASSET"
             exit 1
           fi
-          if ! cmp -s "$EXPECTED_MANIFEST" "$MANIFEST_PATH"; then
-            echo "::error::$MANIFEST_ASSET content does not match its release inputs byte-for-byte"
-            exit 1
-          fi
-          echo "metadata assets: $CHECKSUM_ASSET, $MANIFEST_ASSET"
+          echo "checksum asset: $CHECKSUM_ASSET"
 
       # The evergreen download contract — a PUBLIC, CROSS-PROJECT PROMISE, not
       # an implementation detail of this workflow.
@@ -576,18 +551,17 @@ jobs:
           # `gh release delete` and no `gh release delete-asset` anywhere in it,
           # by design.
           gh release upload "$TAG_NAME" \
-            "$PKG_PATH" "$STABLE_PKG_PATH" "$CHECKSUM_PATH" "$MANIFEST_PATH" \
+            "$PKG_PATH" "$STABLE_PKG_PATH" "$CHECKSUM_PATH" \
             --clobber
-          # Publish the stable feed only after every asset is attached. This is
-          # explicit rather than GitHub's date/version-based latest selection,
-          # and it is what repoints both `latest/download/update-manifest.txt`
-          # for the updater and `latest/download/<product>.pkg` for the
-          # evergreen install link — neither should ever resolve to a release
-          # that is still missing an asset.
+          # Mark latest only after every asset is attached. This is explicit
+          # rather than GitHub's date/version-based latest selection, and it is
+          # what repoints `latest/download/<product>.pkg` for the evergreen
+          # install link — it should never resolve to a release that is still
+          # missing an asset.
           gh release edit "$TAG_NAME" --latest
           gh release view "$TAG_NAME" --json assets \
             --jq '.assets[] | "\(.name)\t\(.size) bytes"'
-          echo "✅ published $(basename "$PKG_PATH"), $(basename "$STABLE_PKG_PATH"), $(basename "$CHECKSUM_PATH"), and $(basename "$MANIFEST_PATH") on $TAG_NAME" \
+          echo "✅ published $(basename "$PKG_PATH"), $(basename "$STABLE_PKG_PATH"), and $(basename "$CHECKSUM_PATH") on $TAG_NAME" \
             >> "$GITHUB_STEP_SUMMARY"
 
       # Retention is only real if it is checked, so the run that ships a build

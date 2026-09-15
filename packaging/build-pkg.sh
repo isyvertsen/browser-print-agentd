@@ -20,7 +20,7 @@
 # source for the product name, the bundle id (which is both the launchd Label
 # and the pkg identifier), the installed paths, and the per-account directory
 # names. Every shipped artifact — the LaunchAgent plist, distribution.xml, the
-# pre/postinstall scripts, launcher, updater, and uninstaller — is a `.in`
+# pre/postinstall scripts, launcher, and uninstaller — is a `.in`
 # template rendered here with sed. Nothing in the staging tree is copied
 # verbatim, and a template that still carries an unrendered __PLACEHOLDER__
 # fails the build rather than shipping. Both plist names derive from identity.
@@ -185,8 +185,6 @@ log "identity: $PRODUCT_NAME / $BUNDLE_ID"
 mkdir -p "$PAYLOAD_DIR/usr/local/bin" \
 	"$PAYLOAD_DIR$LIBEXEC_DIR" \
 	"$PAYLOAD_DIR/Library/LaunchAgents" \
-	"$PAYLOAD_DIR/Library/LaunchDaemons" \
-	"$PAYLOAD_DIR$SYSTEM_LOG_DIR" \
 	"$SCRIPTS_DIR" "$COMPONENTS_DIR" "$OUTPUT_DIR" \
 	"$UNINSTALL_APP_DIR/Contents/MacOS"
 
@@ -230,17 +228,8 @@ render_template() {
 		-e "s|__UNINSTALLER_PATH__|$UNINSTALLER_PATH|g" \
 		-e "s|__LIBEXEC_DIR__|$LIBEXEC_DIR|g" \
 		-e "s|__LAUNCHER_PATH__|$LAUNCHER_PATH|g" \
-		-e "s|__UPDATER_NAME__|$UPDATER_NAME|g" \
-		-e "s|__UPDATER_PATH__|$UPDATER_PATH|g" \
 		-e "s|__PLIST_NAME__|$PLIST_NAME|g" \
 		-e "s|__AGENT_PLIST_PATH__|$AGENT_PLIST_PATH|g" \
-		-e "s|__UPDATER_LABEL__|$UPDATER_LABEL|g" \
-		-e "s|__UPDATER_PLIST_NAME__|$UPDATER_PLIST_NAME|g" \
-		-e "s|__UPDATER_PLIST_PATH__|$UPDATER_PLIST_PATH|g" \
-		-e "s|__SYSTEM_SUPPORT_DIR__|$SYSTEM_SUPPORT_DIR|g" \
-		-e "s|__UPDATE_STATE_DIR__|$UPDATE_STATE_DIR|g" \
-		-e "s|__UPDATE_STATUS_PATH__|$UPDATE_STATUS_PATH|g" \
-		-e "s|__SYSTEM_LOG_DIR__|$SYSTEM_LOG_DIR|g" \
 		-e "s|__SUPPORT_DIR_NAME__|$SUPPORT_DIR_NAME|g" \
 		-e "s|__LOG_DIR_NAME__|$LOG_DIR_NAME|g" \
 		-e "s|__LOG_FILE_NAME__|$LOG_FILE_NAME|g" \
@@ -248,9 +237,6 @@ render_template() {
 		-e "s|__TARGET_USER_ENV__|$TARGET_USER_ENV|g" \
 		-e "s|__LOG_PATH_ENV__|$LOG_PATH_ENV|g" \
 		-e "s|__TEMP_PREFIX__|$TEMP_PREFIX|g" \
-		-e "s|__RELEASE_OWNER__|$RELEASE_OWNER|g" \
-		-e "s|__RELEASE_REPOSITORY__|$RELEASE_REPOSITORY|g" \
-		-e "s|__RELEASE_BASE_URL__|$RELEASE_BASE_URL|g" \
 		-e "s|__COMPONENT_PKG_NAME__|$COMPONENT_PKG_NAME|g" \
 		-e "s|__UNINSTALL_TITLE__|$UNINSTALL_TITLE|g" \
 		-e "s|__UNINSTALL_APP_NAME__|$UNINSTALL_APP_NAME|g" \
@@ -274,14 +260,10 @@ render_template() {
 
 render_template "$PACKAGING_DIR/launcher.sh.in" \
 	"$PAYLOAD_DIR$LAUNCHER_PATH" 755
-render_template "$PACKAGING_DIR/updater.sh.in" \
-	"$PAYLOAD_DIR$UPDATER_PATH" 755
 render_template "$PACKAGING_DIR/uninstall.sh.in" \
 	"$PAYLOAD_DIR$UNINSTALLER_PATH" 755
 render_template "$PACKAGING_DIR/launchagent.plist.in" \
 	"$PAYLOAD_DIR$AGENT_PLIST_PATH" 644
-render_template "$PACKAGING_DIR/updater.plist.in" \
-	"$PAYLOAD_DIR$UPDATER_PLIST_PATH" 644
 render_template "$PACKAGING_DIR/scripts/preinstall.in" "$SCRIPTS_DIR/preinstall" 755
 render_template "$PACKAGING_DIR/scripts/postinstall.in" "$SCRIPTS_DIR/postinstall" 755
 render_template "$PACKAGING_DIR/distribution.xml.in" "$STAGE_DIR/distribution.xml" 644
@@ -342,8 +324,6 @@ fi
 
 plutil -lint "$PAYLOAD_DIR$AGENT_PLIST_PATH" >/dev/null ||
 	fail "the LaunchAgent plist failed plutil -lint"
-plutil -lint "$PAYLOAD_DIR$UPDATER_PLIST_PATH" >/dev/null ||
-	fail "the updater LaunchDaemon plist failed plutil -lint"
 
 if [ -n "$APP_SIGNING_IDENTITY" ]; then
 	log "codesigning the binary with the hardened runtime"

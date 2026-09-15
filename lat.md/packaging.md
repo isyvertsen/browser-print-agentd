@@ -13,10 +13,9 @@ The record is POSIX `sh` with no side effects, because it is sourced by both `bu
 the naming gate. It carries `PRODUCT_NAME`, `PRODUCT_TITLE`, `BUNDLE_ID` (used verbatim as both
 the launchd `Label` and the `productbuild` package identifier), `BINARY_NAME`, `BINARY_PATH`,
 `UNINSTALLER_NAME`/`UNINSTALLER_PATH`, `LIBEXEC_DIR`, `LAUNCHER_PATH`, `PLIST_NAME`,
-`AGENT_PLIST_PATH`, updater script/label/plist paths, public update-status path, root updater support/log paths,
+`AGENT_PLIST_PATH`,
 `SUPPORT_DIR_NAME`, `LOG_DIR_NAME`, `LOG_FILE_NAME`, `ENV_PREFIX`, `TARGET_USER_ENV`,
-`LOG_PATH_ENV`, `TEMP_PREFIX`, the derived
-GitHub release URL, `COMPONENT_PKG_NAME`, the uninstaller app's
+`LOG_PATH_ENV`, `TEMP_PREFIX`, `COMPONENT_PKG_NAME`, the uninstaller app's
 `UNINSTALL_TITLE`/`UNINSTALL_APP_NAME`/`UNINSTALL_APP_PATH`/`UNINSTALL_APP_BUNDLE_ID`/`UNINSTALL_APP_EXEC`,
 and the release-tag glob. Everything but the product
 name itself and the reverse-DNS namespace prefix is derived, so a rename is a one-line edit.
@@ -53,11 +52,11 @@ Every shipped packaging artifact is a `.in` template that `packaging/build-pkg.s
 `sed` into its staging directory. No artifact is copied verbatim, and none is runnable straight
 from the repository.
 
-The template set is `launchagent.plist.in`, `updater.plist.in`, `distribution.xml.in`,
-`launcher.sh.in`, `updater.sh.in`, `uninstall.sh.in`, `scripts/preinstall.in`,
+The template set is `launchagent.plist.in`, `distribution.xml.in`,
+`launcher.sh.in`, `uninstall.sh.in`, `scripts/preinstall.in`,
 `scripts/postinstall.in`, `component.plist.in`, and the two that make up the uninstaller app
 ([[packaging#Packaging#Station Installer#Uninstaller#The Uninstaller App]]):
-`uninstall-app-info.plist.in` and `uninstall-app.sh.in`. Rendering fills both launchd labels and
+`uninstall-app-info.plist.in` and `uninstall-app.sh.in`. Rendering fills the launchd label and
 paths, the `distribution.xml`
 `title`/`choice`/`pkg-ref` ids and component package name, installer/uninstaller paths, account and
 root support/log directories, release URL, log-tag prefixes, target-user environment variable,
@@ -182,58 +181,19 @@ documented transient condition tied to a staged OS update, not a packaging defec
 stations current on macOS is therefore an availability requirement. The plist comment carries the
 diagnosis so the next reader does not go hunting for a `KeepAlive` variant that does not exist.
 
-### Root Updater LaunchDaemon
-
-The updater is a separate, short-lived root LaunchDaemon; the print agent remains an unprivileged
-per-user LaunchAgent with no egress or update routes.
-
-`${UPDATER_LABEL}` runs `${UPDATER_PATH}` in the system domain at load and hourly on the hour, via
-a `StartCalendarInterval` of `Minute 0` rather than a `StartInterval`, with 0-300 seconds (up to 5
-minutes) of script-level jitter. The calendar key is what makes a sleeping station recover: a
-`StartInterval` firing during sleep is documented as missed, a calendar one runs on wake. The two
-are distinguishable on a live station, which is what makes the schedule assertable rather than
-assumed: `launchctl print` renders an interval job with a `run interval = <N> seconds` line, and a
-calendar job with an event stream named `com.apple.launchd.calendarinterval` and no interval line
-at all (observed on macOS 26.6). The load-time run waits up to 300
-seconds for a console user instead of testing once, because launchd starts this job before
-loginwindow has handed `/dev/console` to anybody and an immediate test would make every boot check
-a no-op. The `v0.3.0` release-validation
-baseline temporarily used a 60-second interval and 0-5 seconds of jitter. `v0.3.1` carried the
-production values but its unconditional trust mutation failed in the noninteractive updater;
-`v0.3.2` is the idempotent-trust recovery release and retains those production values. It has no
-`KeepAlive`. Every check therefore starts from the script currently on disk, and `postinstall`
-never boots out an already registered updater: a package replacement cannot kill the process
-that invoked `installer`. Consequently, automatic installation of `v0.3.2` replaces the plist
-but the loaded `v0.3.0` job retains its 60-second interval until a reboot or explicit
-system-domain bootout/bootstrap. Bootstrap happens only after the print agent's own health probe,
-preserves launchd's disabled override, and uses an install marker plus the updater's
-`installer`-process check to prevent the RunAtLoad execution from nesting inside the package
-installation that registered it.
-
-The system support directory is root-owned mode 755 solely to provide traversal to one sanitized,
-root-owned mode-644 status file. Its `updater/` child remains mode 700 and holds the detailed
-last-run file, failed-version quarantine, and verified rollback package. The public file is
-atomically replaced and carries only bounded timestamp/outcome/latest-version/quarantine facts;
-it contains no package, quarantine list, Team ID, URL, credential, or updater control. The root
-log directory is distinct from every account's agent log. All paths, both updater artifacts, the
-release feed URL, and updater label derive from `identity.sh`; uninstall removes them with the
-original payload.
-
 ### Preinstall And Postinstall
 
 `scripts/preinstall.in` runs before a single file is written and does the things that can
 invalidate the whole install; `scripts/postinstall.in` runs after the payload lands and does the
 things that need it there.
 
-`preinstall` first removes any prior copy of this product and then, by path,
-the vendor's Browser Print: every matching launchd job is unloaded by the `Label` read out of its
-own plist, leftover processes are killed, the app and support paths are deleted, and the receipts
-are forgotten — nothing branches on the vendor's version or architecture, and a station that
-never had it finds nothing to remove.
-Then it proves 9100 and 9101 are actually free, which is the mitigation for the worst failure
-mode: anything else holding those ports makes a `KeepAlive` agent crash-loop and printing die
-silently, so the install stops loudly instead. Removal runs here rather than in `postinstall` so
-a station that cannot be cleaned fails before the payload lands.
+`preinstall` boots out any prior copy of this product and nothing else. It then proves 9100 and
+9101 are actually free, which is the mitigation for the worst failure mode: anything holding
+those ports makes a `KeepAlive` agent crash-loop and printing die silently, so the install stops
+loudly instead, with the `lsof` listing and an instruction to quit or uninstall the holder. The
+upstream project deleted the vendor's Browser Print here, by path glob and `pkill -f`, as root;
+this fork does not. An installer that `rm -rf`s software it did not install — and whose globs
+also matched the vendor's other products — is the wrong trade for saving an operator one quit.
 
 `postinstall` generates the per-station cert with `openssl` (CN and SAN `localhost`, EKU
 `serverAuth`, 730 days — inside Apple's 825-day trust ceiling), reusing an existing pair unless it
@@ -243,7 +203,7 @@ OpenSSL through a config file and must not be rewritten to use `-addext`, becaus
 (or `${TARGET_USER_ENV}` for an unattended install), proves the HTTP endpoint, then waits for the
 HTTPS listener with a bounded `curl -k`. Only after listener readiness does a normal
 `https://localhost:9101/available` request test actual SecureTransport trust. Success leaves the
-**System** keychain unchanged, making reinstall, rollback, and background update idempotent. Failure
+**System** keychain unchanged, making reinstall and rollback idempotent. Failure
 runs `security add-trusted-cert -d -r trustRoot -p ssl` — machine-wide, admin-owned, and restricted
 to TLS evaluation — then requires the same normal request to pass. This behavioral check avoids
 localized trust-setting output and `security verify-cert`. A failed HTTP, HTTPS-readiness, or
@@ -252,9 +212,9 @@ the exact phantom success this agent exists to kill.
 
 ### Migration Is Not Automatic
 
-Installing over a *differently-named* localhost print agent is a hard failure, not a migration.
-`preinstall` stops only jobs it can identify — its own launchd label and the vendor's Browser
-Print — so any other port holder trips the port-freedom check.
+Installing over any other localhost print agent is a hard failure, not a migration.
+`preinstall` stops only its own launchd label, so every other port holder — the vendor's Browser
+Print included — trips the port-freedom check.
 
 There is no legacy-cleanup path, and the omission is deliberate. Recognising a foreign agent means
 guessing at a launchd label, an install path, and a keychain certificate that belong to a product
@@ -290,8 +250,7 @@ which matches its pattern anywhere in a command line — and the uninstaller's o
 It killed the run one line before the payload deletion, leaving stations with their launchd jobs
 torn down and every file still on disk, and it did so on both the command-line and GUI paths. The
 pattern now requires whitespace-or-end after the path, which the agent's command line satisfies and
-`-uninstall` cannot. Anchoring with `^` would be the obvious fix and is wrong: the updater is a
-shell script, so its command line begins with the interpreter rather than the path.
+`-uninstall` cannot.
 
 Everything the script does is per-account below the machine-wide payload, so a station with more
 than one printing account needs one `--user <account>` run per account. When an admin runs it at

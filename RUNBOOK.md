@@ -9,15 +9,15 @@ release chain. This document describes what you *do* with it. Read the wire cont
 have not; several diagnostics below only make sense against it.
 
 The agent ships only as a signed, notarized `.pkg` attached to a `vX.Y.Z` GitHub release. Nothing
-on a station is ever built from source. A separate root LaunchDaemon keeps the package aligned to
-GitHub's latest-release manifest; the unprivileged print agent never updates itself and retains
-zero network egress. Manual rollback remains one package install after pinning the updater.
+on a station is ever built from source, nothing on a station updates itself, and nothing on a
+station has network egress. Upgrading and rolling back are the same thing: one package install,
+run by an admin, on purpose.
 
 ## Contents
 
 - [Releases and where the installers live](#releases-and-where-the-installers-live)
 - [Installing on a station](#installing-on-a-station)
-- [Managing automatic updates](#managing-automatic-updates)
+- [Station configuration](#station-configuration)
 - [Migrating from another localhost print agent](#migrating-from-another-localhost-print-agent)
 - [Rolling back to the previous release](#rolling-back-to-the-previous-release)
 - [Uninstalling](#uninstalling)
@@ -85,10 +85,9 @@ Consequences worth knowing before you touch a release:
 - **Hand-editing a release can break the link.** Deleting the evergreen asset from the newest
   release, or unmarking that release as latest, breaks it without breaking anything else you
   would notice. Nothing in the workflow deletes assets; only a human can.
-- **The updater does not use this link.** The root updater daemon reads
-  `latest/download/update-manifest.txt`, and the manifest names the *versioned* asset, which it
-  then fetches by name. Automatic updates therefore keep working even if the evergreen copy is
-  missing — which is precisely why its absence is easy to miss. Check for it explicitly.
+- **Nothing on a station notices when it breaks.** No station ever fetches this link on its own,
+  so a missing evergreen asset is only found when a person tries to install. Check for it
+  explicitly after every release.
 
 **Owner: the maintainer of this repository.** The obligation lives with the release workflow, and
 the same note is written at the copy step in `.github/workflows/release.yml`. Removing or
@@ -120,8 +119,8 @@ list in a browser, and is the only supported install source.
 ## Installing on a station
 
 Installing is one `installer` command run by an admin while the station account is logged in at
-the console. Everything else — removing Zebra Browser Print, generating and trusting the station
-certificate, registering the LaunchAgent — happens inside the package's `preinstall` and
+the console. Everything else — generating and trusting the station certificate, registering the
+LaunchAgent — happens inside the package's `preinstall` and
 `postinstall` scripts, because all of it is root work and an operator may not have admin rights.
 
 **Before you start**, have three things true:
@@ -171,19 +170,16 @@ target volume.
 
 - **Any prior copy of this agent is booted out**, by the launchd label read from its own plist, so
   a reinstall or an upgrade is never blocked by the version it is replacing.
-- **Zebra Browser Print is removed, path-based.** Its launchd jobs are booted out by the `Label`
-  read from each plist, leftover processes are killed, the app and support directories are
-  deleted, and the receipts are forgotten. Nothing branches on Zebra's version or architecture, and
-  a station that never had it simply finds nothing to remove. Coexistence is not a supported state:
-  both agents want ports 9100/9101.
-- **Ports 9100 and 9101 are proven free.** After the two removals above, the script waits up to
-  10 s for the ports to drain and **fails loudly** if anything still listens, printing the `lsof`
-  listing. That is deliberate: behind `KeepAlive`, an agent that cannot bind crash-loops and
-  printing dies silently. Note the scope — the only things stopped for you are this agent and
-  Zebra Browser Print. Any *other* port holder, including a differently-named print agent, is a
-  hard failure you resolve first.
+- **Nothing else is removed.** The installer never deletes software it did not install — not
+  Zebra Browser Print, not another localhost print agent. Coexistence is still not a supported
+  state, because both want ports 9100/9101, but quitting or uninstalling the other one is your
+  job, done before you run this installer.
+- **Ports 9100 and 9101 are proven free.** The script waits up to 10 s for the ports to drain and
+  **fails loudly** if anything still listens, printing the `lsof` listing and telling you to stop
+  that program yourself. That is deliberate: behind `KeepAlive`, an agent that cannot bind
+  crash-loops and printing dies silently.
 
-`postinstall` then does five things, in order:
+`postinstall` then does four things, in order:
 
 1. **Generates the station certificate** with `openssl` into
    `~/Library/Application Support/browser-print-agentd/` (`cert.pem` + `key.pem`, mode 600 on the
@@ -201,23 +197,15 @@ target volume.
    unchanged. If it fails, a first install adds machine-wide, SSL-only trust with
    `security add-trusted-cert -d -r trustRoot -p ssl`, then requires the normal request to pass.
    No localized keychain output is parsed, and a trust failure fails the install.
-5. **Registers the updater LaunchDaemon** in the system domain after printing is healthy. A
-   running updater is never booted out during install-over-install, and a disabled updater stays
-   disabled, so package replacement cannot kill its own parent process or erase an admin pin.
 
-Machine-wide payload and updater state:
+Machine-wide payload:
 
 | Path | Role |
 | ---- | ---- |
 | `/usr/local/bin/browser-print-agentd` | print agent binary |
 | `/usr/local/bin/browser-print-agentd-uninstall` | complete uninstaller |
 | `/usr/local/libexec/browser-print-agentd/launcher` | per-user agent entry point |
-| `/usr/local/libexec/browser-print-agentd/updater` | short-lived root updater |
 | `/Library/LaunchAgents/io.github.sharaf-nassar.browser-print-agentd.plist` | per-user print job |
-| `/Library/LaunchDaemons/io.github.sharaf-nassar.browser-print-agentd.updater.plist` | system update job |
-| `/Library/Application Support/browser-print-agentd/update-status` | sanitized updater status read by `/health` |
-| `/Library/Application Support/browser-print-agentd/updater/` | verified rollback cache and state |
-| `/Library/Logs/browser-print-agentd/update.log` | updater log |
 
 The cert and agent log remain per-account under
 `~/Library/Application Support/browser-print-agentd/` and
@@ -243,200 +231,7 @@ trust step took. A security warning instead means the certificate is served but 
 [Safari and the certificate](#safari-and-the-certificate). Never ask an operator to click through
 that warning; re-running the installer is the supported repair.
 
-## Managing automatic updates
-
-The package ships a short-lived root updater. It runs at load and hourly on the hour, adds 0-300
-seconds (up to 5 minutes) of jitter, performs one check, and exits.
-
-The schedule is a `StartCalendarInterval` of `Minute 0`, not a `StartInterval`. That is deliberate
-and it is about sleep: `launchd.plist(5)` says a `StartInterval` firing that falls while the system
-is asleep "will be missed due to shortcomings in `kqueue(3)`", while a `StartCalendarInterval` job
-starts "the next time the computer wakes up", coalescing multiple missed intervals into one. A
-station that sleeps overnight would otherwise wake and wait for a further full interval, and
-`RunAtLoad` does not cover it because waking is not loading. The script-level jitter is what stops
-a fleet that all fires at `:00` from arriving at GitHub together. It needs a station account
-logged in at the console because the package's own `postinstall` needs that account, and it waits
-up to 300 seconds for one before giving up — that wait is what makes the load-time run useful,
-since launchd starts this job at boot while `/dev/console` still belongs to `root`. A station
-parked at the login window skips and waits for the next interval.
-The `v0.3.0` release-validation baseline temporarily used a 60-second interval and 0-5 seconds of
-jitter. `v0.3.1` carried the production cadence but failed background installation when it tried
-to re-add already-working certificate trust. `v0.3.2` keeps the production cadence and makes that
-trust step behaviorally idempotent.
-
-**A reboot is the supported way to force a check.** Rebooting both fires the load-time run and
-picks up the current on-disk interval. Logging out and back in does not: the updater is a
-system-domain LaunchDaemon and is not reloaded by a user session.
-
-The updater downloads the strict `update-manifest.txt` asset from the GitHub latest-release URL.
-The manifest names one version, package asset, and SHA-256 digest. Its version is compared with the
-installer receipt; **any difference installs**, not only a higher version. Marking a defective
-release prerelease or moving `latest` back therefore makes the next check restore the previous
-release fleet-wide.
-
-Before `installer` runs, the updater:
-
-- verifies the manifest grammar and exact asset name;
-- checks the package SHA-256;
-- validates its Developer ID Installer signature against the Team ID read at runtime from the
-  installed binary's code signature — the Team ID is never stored or logged;
-- writes `com.apple.quarantine` and requires `spctl --assess --type install` to report
-  `Notarized Developer ID`; and
-- downloads and verifies the currently installed release package as a rollback cache.
-
-After installation it polls `/health` until `X-Print-Agent-Version` matches the manifest. Failure
-reinstalls the cached package and records the failed version in `quarantined-versions`, so that
-same version is not retried on every scheduled run.
-
-After each recorded outcome, the updater atomically publishes only its timestamp, outcome,
-latest strictly validated manifest version, and whether that version is quarantined. `/health`
-combines those facts with launchd's live disabled override. This keeps the agent at zero egress
-and keeps the cache, quarantine list, signing identity, and updater controls root-only.
-
-### Validate release-to-release automatic updates
-
-Use this checklist to prove the accelerated baseline recovers automatically from the failed
-`v0.3.1` background install by installing fixed `v0.3.2`, without a manual install or agent
-kickstart, then leave the station running the production cadence.
-
-1. Install the accelerated `v0.3.0` baseline manually while the station account is logged in.
-   Confirm its version and that the updater is enabled:
-
-   ```bash
-   curl -fsS http://127.0.0.1:9100/health
-   pkgutil --pkg-info io.github.sharaf-nassar.browser-print-agentd
-   sudo launchctl print-disabled system | \
-     grep io.github.sharaf-nassar.browser-print-agentd.updater
-   sudo launchctl print system/io.github.sharaf-nassar.browser-print-agentd.updater | \
-     grep 'run interval'
-   ```
-
-   Expect a 60-second loaded interval and no true disabled override. If `v0.3.1` already attempted
-   its update and rollback, the agent may be unloaded; do not repair or kickstart it. Confirm the
-   receipt is still `v0.3.0`, retain the updater log, and record the cert fingerprint before
-   publishing the recovery:
-
-   ```bash
-   openssl x509 \
-     -in ~/Library/Application\ Support/browser-print-agentd/cert.pem \
-     -noout -fingerprint -sha1
-   ```
-
-2. Publish signed, notarized `v0.3.2` and mark it latest. Its source and packaged plist must use
-   a `StartCalendarInterval` of `Minute 0`, and its updater script must use 0-300 seconds of
-   jitter. Its
-   `postinstall` must skip `security add-trusted-cert` when a normal no-`-k` HTTPS request already
-   validates the reused station cert.
-
-3. Do not run `kickstart` or install the successor manually. Note its publication time, then watch
-   the updater log:
-
-   ```bash
-   sudo tail -f /Library/Logs/browser-print-agentd/update.log
-   ```
-
-   Expect the next scheduled check to begin within about 65 seconds. Package download,
-   verification, installation, and the post-install health probe can finish later.
-
-4. After the log records `updated`, confirm both the receipt and running agent report `v0.3.2`.
-   Confirm `/health` reports the update outcome and latest version, and confirm the cert
-   fingerprint is unchanged:
-
-   ```bash
-   pkgutil --pkg-info io.github.sharaf-nassar.browser-print-agentd
-   curl -fsS http://127.0.0.1:9100/health
-   sudo cat /Library/Application\ Support/browser-print-agentd/updater/last-run.txt
-   openssl x509 \
-     -in ~/Library/Application\ Support/browser-print-agentd/cert.pem \
-     -noout -fingerprint -sha1
-   ```
-
-   The postinstall log must say existing trust was valid and the System keychain was left
-   unchanged. No authorization dialog may appear.
-
-5. The automatic install replaces the plist on disk but does not boot out the loaded `v0.3.0`
-   updater that invoked it. After the log records the completed `v0.3.2` update and the updater
-   exits, prove the on-disk/loaded distinction:
-
-   ```bash
-   plutil -p \
-     /Library/LaunchDaemons/io.github.sharaf-nassar.browser-print-agentd.updater.plist | \
-     grep -A3 StartCalendarInterval
-   sudo launchctl print system/io.github.sharaf-nassar.browser-print-agentd.updater | \
-     grep -iE 'run interval|calendarinterval'
-   ```
-
-   Expect the plist on disk to show `StartCalendarInterval` with `Minute => 0`, while the
-   still-loaded older LaunchDaemon still reports `run interval = <N> seconds` — the two disagreeing
-   is the expected mid-upgrade state, not a fault. A `run interval` line means the loaded job is
-   still the old `StartInterval` definition. Then either reboot the Mac or
-   reload the system LaunchDaemon so launchd adopts the on-disk schedule:
-
-   ```bash
-   sudo launchctl bootout \
-     system/io.github.sharaf-nassar.browser-print-agentd.updater
-   sudo launchctl bootstrap system \
-     /Library/LaunchDaemons/io.github.sharaf-nassar.browser-print-agentd.updater.plist
-   sudo launchctl print system/io.github.sharaf-nassar.browser-print-agentd.updater | \
-     grep -iE 'run interval|calendarinterval'
-   ```
-
-   Expect **no** `run interval` line at all, and instead an event stream named
-   `com.apple.launchd.calendarinterval` — captured from a station on macOS 26.6:
-
-   ```text
-               stream = com.apple.launchd.calendarinterval
-           "com.apple.launchd.calendarinterval" = {
-   ```
-
-   That string is the assertion: a calendar-scheduled job is registered as a launchd event stream
-   rather than as a timer with a seconds interval, so `run interval` reappearing means the job
-   reverted to a `StartInterval` definition. Rebooting instead loads the same schedule, and also
-   exercises the load-time check: the run waits for the station account to log in rather than
-   skipping on an unowned `/dev/console`.
-
-### Pin or resume a station
-
-Pinning is one persistent launchd override. It survives package upgrades:
-
-```bash
-sudo launchctl disable system/io.github.sharaf-nassar.browser-print-agentd.updater
-```
-
-The updater is short-lived, so the command prevents future launches; an update already inside
-`installer` is allowed to finish or roll back. `/health` reports `"pinned":true` from launchd
-itself; it does not trust the updater's last file write, which necessarily predates a disable.
-Resume with:
-
-```bash
-sudo launchctl enable system/io.github.sharaf-nassar.browser-print-agentd.updater
-```
-
-If `launchctl print system/io.github.sharaf-nassar.browser-print-agentd.updater` now says the
-service is not found, bootstrap its installed plist once:
-
-```bash
-sudo launchctl bootstrap system \
-  /Library/LaunchDaemons/io.github.sharaf-nassar.browser-print-agentd.updater.plist
-```
-
-Then request a check:
-
-```bash
-sudo launchctl kickstart system/io.github.sharaf-nassar.browser-print-agentd.updater
-```
-
-Updater state is root-owned:
-
-| Path | Meaning |
-| ---- | ------- |
-| `/Library/Logs/browser-print-agentd/update.log` | download, verification, install, and rollback trail |
-| `/Library/Application Support/browser-print-agentd/update-status` | mode-644 sanitized publication used by `/health` |
-| `/Library/Application Support/browser-print-agentd/updater/last-run.txt` | latest status, timestamp, and relevant version |
-| `/Library/Application Support/browser-print-agentd/updater/quarantined-versions` | versions suppressed after failed installation |
-| `/Library/Application Support/browser-print-agentd/updater/good.pkg` | verified package for rollback |
-
-See [Updater troubleshooting](#updater-troubleshooting) before changing state by hand.
+## Station configuration
 
 ### Per-station configuration
 
@@ -473,11 +268,11 @@ is correct because the agent always spools with `lp -o raw`, which bypasses the 
 
 ## Migrating from another localhost print agent
 
-Read this if the station already runs a *different* localhost print agent on 9100/9101 — a
-predecessor of this one built under another product name, or any third-party build of the same
-idea. The install does **not** migrate it for you, and that is a deliberate choice: the installer
-only stops jobs it can identify as its own or as Zebra Browser Print, and it will not go hunting
-for arbitrary port holders to kill.
+Read this if the station already runs *any* other localhost print agent on 9100/9101 — Zebra
+Browser Print itself, a predecessor of this one built under another product name, or any
+third-party build of the same idea. The install does **not** remove it for you, and that is a
+deliberate choice: the installer only stops jobs it can identify as its own, and it never deletes
+or kills anything else on the machine.
 
 ### What happens if you skip this
 
@@ -486,8 +281,9 @@ for arbitrary port holders to kill.
 ```text
 [browser-print-agentd preinstall] ERROR: port 9100 is still held after 10 s (see the listing
 above). The agent would crash-loop behind a KeepAlive restart and printing would fail silently,
-so this install is stopping here. Stop that process (or finish removing Zebra Browser Print by
-hand) and re-run the installer.
+so this install is stopping here. This installer never removes other software: quit or
+uninstall that program (Zebra Browser Print, or another localhost print agent) yourself and
+re-run the installer.
 ```
 
 Nothing has been written at that point — the station is exactly as it was. The fix is to remove
@@ -579,11 +375,9 @@ lost `:9101`, or the agent is crash-looping. Reinstalling the previous release's
 service. There is no un-install step and no cleanup first: the older installer is a normal install
 that happens to be older.
 
-1. **Pin the updater, then record what is running**, so the bad build is identifiable after it is
-   gone and the latest feed cannot immediately reinstall it:
+1. **Record what is running**, so the bad build is identifiable after it is gone:
 
    ```bash
-   sudo launchctl disable system/io.github.sharaf-nassar.browser-print-agentd.updater
    curl -fsS http://127.0.0.1:9100/health
    pkgutil --pkg-info io.github.sharaf-nassar.browser-print-agentd
    ```
@@ -636,11 +430,9 @@ that happens to be older.
    accepted the job" is where the agent's honesty guarantee ends, so the physical label is what
    closes the loop.
 
-5. **Leave the station pinned until the bad build is fixed.** File the defect against the bad
-   release before moving on. Once the GitHub latest-release manifest names a good version, resume
-   the updater using [Pin or resume a station](#pin-or-resume-a-station). If maintainers yank the
-   bad latest release first, the updater performs this same downgrade automatically and no manual
-   rollback is needed.
+5. **Leave the station on the older build until the bad one is fixed.** Nothing will move it
+   forward on its own. File the defect against the bad release before moving on, and install the
+   fixed release by hand when it ships.
 
 **Rolling back across a rename.** If the version you want to go back to shipped under a *different*
 product name, this is not a rollback — it is a migration in the other direction. Its `.pkg` will
@@ -660,10 +452,9 @@ reverse.
 ## Uninstalling
 
 `browser-print-agentd-uninstall` ships as `/usr/local/bin/browser-print-agentd-uninstall` and
-removes everything the install put on the machine: LaunchAgent, updater LaunchDaemon, binary,
-launcher, updater script/cache/state, keychain trust and station cert (matched by SHA-1
-fingerprint, never by name), agent/updater logs, and installer receipt — then confirms 9100 and
-9101 came free.
+removes everything the install put on the machine: LaunchAgent, binary, launcher, keychain trust
+and station cert (matched by SHA-1 fingerprint, never by name), agent log, and installer
+receipt — then confirms 9100 and 9101 came free.
 
 ```bash
 sudo browser-print-agentd-uninstall          # add --user <account> on a multi-account station
@@ -707,7 +498,6 @@ Confirm the station is clean:
 
 ```bash
 launchctl print gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd  # "Could not find service"
-sudo launchctl print system/io.github.sharaf-nassar.browser-print-agentd.updater  # same
 lsof -nP -iTCP:9100 -sTCP:LISTEN ; lsof -nP -iTCP:9101 -sTCP:LISTEN        # expect no output
 pkgutil --pkg-info io.github.sharaf-nassar.browser-print-agentd            # expect "No receipt"
 security find-certificate -c localhost -a /Library/Keychains/System.keychain  # ours is gone
@@ -747,57 +537,10 @@ curl -fsS http://127.0.0.1:9100/health
 `GET /health` is always the first call. Unlike `/available`, which hides unhealthy printers so a
 caller can never pin one, `/health` lists **every** discovered queue with its verdict, and it
 answers 200 even when CUPS itself is unreachable. The same version rides every response as the
-`X-Print-Agent-Version` header. When local updater state is valid, `update` also reports the last
-check, latest known release, quarantine verdict, and live launchd pin. Its absence means the
-updater/status is absent, unsafe, malformed, unreadable, or launchd pin truth could not be proven;
-it never makes the health request fail.
+`X-Print-Agent-Version` header.
 
 If the agent answers but you are not sure it is *this* agent, see
 [Telling two agents apart](#telling-two-agents-apart).
-
-### Updater troubleshooting
-
-The updater and agent are separate jobs. An updater failure does not add an HTTP route, change
-the frozen wire contract, or give the agent egress. Start with the sanitized view, then inspect
-root-only detail when needed:
-
-```bash
-curl -fsS http://127.0.0.1:9100/health
-sudo launchctl print system/io.github.sharaf-nassar.browser-print-agentd.updater | head -30
-sudo launchctl print-disabled system | grep io.github.sharaf-nassar.browser-print-agentd.updater
-sudo tail -100 /Library/Logs/browser-print-agentd/update.log
-sudo cat /Library/Application\ Support/browser-print-agentd/updater/last-run.txt
-```
-
-`update.status` uses the same values below. `latestVersion` and `quarantined` are absent when a
-run skipped or failed before a manifest passed strict validation. `pinned` is always a live
-launchd verdict, not a value persisted by the updater.
-
-Common statuses:
-
-| Status | Meaning and action |
-| ------ | ------------------ |
-| `skipped-no-user` | Nobody was logged in at the console. No fault; next scheduled run checks again. |
-| `current` / `updated` | Receipt already matched, or install and version probe succeeded. |
-| `manifest-fetch-failed` / `package-fetch-failed` | Network or GitHub unavailable. The installed agent is untouched; retry later. |
-| `manifest-invalid` / `checksum-failed` / `trust-failed` | Release input failed closed before install. Do not bypass it; inspect the release assets. |
-| `rollback-cache-failed` | Current version's retained package could not be independently downloaded and verified, so replacement was refused. |
-| `rolled-back` | New install or version probe failed; verified previous package was restored and failed version quarantined. |
-| `rollback-failed` | Both update and recovery failed. Keep station pinned and perform the manual rollback procedure immediately. |
-| `quarantined` | Latest still names a version that already failed installation; updater will not retry it. |
-
-`quarantined-versions` is normally self-resolving because the next good release has a new version.
-If maintainers intentionally replace the asset under the **same** version, verify the repaired
-release first, clear the suppression, then request one check:
-
-```bash
-sudo rm -f /Library/Application\ Support/browser-print-agentd/updater/quarantined-versions
-sudo launchctl kickstart system/io.github.sharaf-nassar.browser-print-agentd.updater
-```
-
-Never delete `good.pkg` during an incident; it is the verified rollback package. Never work around
-`checksum-failed` or `trust-failed` with `xattr -d`, an alternate installer flag, or a hand-edited
-manifest.
 
 ### Agent not answering
 
@@ -1087,8 +830,8 @@ depends on the agent. Nothing here can be proven by CI: automated coverage stops
 and every item below is exactly the part a stub cannot see. Record the result of each item — pass,
 fail, or observed value — against the release you validated.
 
-**Setup:** a station Mac that still has Zebra Browser Print installed (so removal is actually
-exercised), a Zebra printer on USB, a second Zebra reachable over the network for the failover and
+**Setup:** a station Mac with Zebra Browser Print quit or uninstalled beforehand (the installer
+refuses to run over it), a Zebra printer on USB, a second Zebra reachable over the network for the failover and
 multi-printer items, the calling page reachable, and the previous release's `.pkg` downloaded for
 the downgrade item.
 
@@ -1108,9 +851,10 @@ exercised rather than bypassed.
 - [ ] `installer` succeeds with **no `xattr` quarantine removal and no right-click → Open**.
 - [ ] `spctl --assess --type install -vv` reports `accepted` with `source=Notarized Developer ID`,
       and `stapler validate` passes, so the package installs offline.
-- [ ] `preinstall` reports Zebra Browser Print removed; afterwards `/Applications`,
-      `/Library/LaunchAgents`, `/Library/LaunchDaemons`, and `pkgutil --pkgs` hold nothing Zebra,
-      and ports 9100/9101 are free before the payload lands.
+- [ ] With Zebra Browser Print still running, `installer` stops in `preinstall` with the `lsof`
+      listing and the "never removes other software" message, and nothing has been written. With
+      it quit, `preinstall` reports both ports free before the payload lands. Zebra's files are
+      untouched either way.
 - [ ] `postinstall` generates the cert, bootstraps the job, proves both listeners, and either
       verifies existing trust or adds and verifies first-install trust. The install exits 0 with
       **no GUI authorization dialog and no administrator password prompt**, which is what makes an
@@ -1287,26 +1031,3 @@ unambiguous top — a solid bar across the top quarter is enough.
       catches an over-eager compensation, and it is the failure a station would otherwise discover
       only after a shift printed upside down.
 
-### 13. Automatic update lands unattended, and a reboot forces a check
-
-The update path is the one mechanism no CI job can exercise: it needs a station that was already
-running an older release when a newer one was published. Do not `kickstart` and do not install the
-successor by hand — the point is that nobody touched it.
-
-- [ ] With the station on release N and idle, publish N+1. Within the hour the agent reports N+1 on
-      `/health`, the receipt says N+1, and `update.status` is `updated`.
-- [ ] The printer is still `healthy: true` afterwards. An update bounces the LaunchAgent, so this
-      is what proves a station comes back rather than needing a hand.
-- [ ] `plutil -p` on the updater plist shows `StartCalendarInterval` with `Minute => 0`, while
-      `launchctl print` on the still-loaded job still reports `run interval = <N> seconds` from the
-      definition it was registered with. The two disagreeing immediately after an automatic update
-      is expected: `postinstall` never boots out a registered updater.
-- [ ] Reboot. `launchctl print` now shows no `run interval` line and an event stream named
-      `com.apple.launchd.calendarinterval` instead, and `/Library/Logs/browser-print-agentd/update.log`
-      shows a load-time run that did **not** exit `no console user; skipping`. A line reading
-      `console user appeared after Ns` is that run waiting for the login rather than giving up, and
-      is the expected shape on a Mac where login is not instant.
-- [ ] **Not yet validated:** that a check falling while the Mac is asleep runs on wake.
-      `StartCalendarInterval` is documented to behave that way and `StartInterval` is documented not
-      to, which is why the key was changed — but nobody has slept a station past the hour and
-      confirmed it. Treat the wake behaviour as designed-for, not proven.

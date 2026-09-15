@@ -203,21 +203,12 @@ that asset name, so the release path can predict the package path and hard-fail 
 writes something else instead of discovering whatever it happened to produce.
 
 Only after the package passes notarization, stapling, and the quarantined Gatekeeper assessment
-does the workflow derive two metadata assets from it. `<pkg>.sha256` is one `shasum`-compatible
-line containing the lowercase package digest and exact installer asset name. The stable
-`update-manifest.txt` asset is exactly three newline-terminated records:
-
-```text
-version=<X.Y.Z>
-asset=<browser-print-agentd-X.Y.Z.pkg>
-sha256=<64 lowercase hexadecimal characters>
-```
-
-The workflow constructs expected checksum and manifest files independently and compares them
-byte-for-byte before upload. It also asserts all three asset names rather than trusting path
-construction. The package, checksum, and manifest are uploaded together, and the release is
-marked `--latest` explicitly so the updater's `releases/latest/download/…` URL resolves to the
-feed that names that package.
+does the workflow derive its checksum asset. `<pkg>.sha256` is one `shasum`-compatible line
+containing the lowercase package digest and exact installer asset name, and the workflow verifies
+it back against the package with `shasum -c` before upload. It also asserts both asset names
+rather than trusting path construction. The package and checksum are uploaded together, and the
+release is marked `--latest` explicitly so the evergreen `releases/latest/download/…` URL
+resolves to a release that has every asset attached.
 
 Retention is only real if a run proves it, so the run that ships a build also names the build a
 station falls back to: after upload the previous `v*` release is read back and its installer and
@@ -227,7 +218,7 @@ than a habit. That lookup selects the previous release's **versioned** `.pkg` an
 excludes the [[infrastructure#Release Chain#Evergreen Download Asset|evergreen copy]]: a release
 carries two `.pkg` assets, and a version-free filename names no build, so an `endswith(".pkg")`
 match alone could report a rollback target that tells an operator nothing. Nothing in the path
-deletes, and a `--clobber` on the upload can only ever replace the four assets of the tag being
+deletes, and a `--clobber` on the upload can only ever replace the three assets of the tag being
 released, since a different tag is a different release. A prior release with no versioned `.pkg`
 warns rather than fails — the package just shipped is already published and notarized, and
 failing there would report a bad release for a defect in an older one.
@@ -242,7 +233,7 @@ A downstream consumer — the operator-facing web app whose print surface talks 
 hands a station with no agent installed a single `releases/latest/download/browser-print-agentd.pkg`
 link. GitHub answers that with a 302 to whichever release is currently marked latest, so the URL
 never has to be edited for a new version. That redirect ignores drafts and prereleases, which is
-why the release is marked `--latest` only after all four assets are attached: the link must never
+why the release is marked `--latest` only after all three assets are attached: the link must never
 resolve to a release that is still missing its installer. Renaming the asset, or shipping without
 it, 404s the only install route offered to a station that cannot print until it gets one.
 
@@ -255,7 +246,6 @@ SHA-256 against the versioned package and revalidates the stapled ticket on the 
 this is the file an operator actually downloads, so it is checked as such rather than assumed
 correct because `cp` returned zero.
 
-The updater does not consume this asset. It reads `update-manifest.txt`, which names the
-versioned package, so automatic updates keep working with the evergreen copy missing — which is
-exactly what makes its absence easy to miss and why `RUNBOOK.md` documents an explicit
-logged-out check after every release.
+Nothing on a station fetches this asset automatically, so a missing copy is only discovered
+when a person tries to install — which is why `RUNBOOK.md` documents an explicit check after
+every release.

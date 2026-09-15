@@ -21,11 +21,10 @@ then install the pending macOS update and reboot, because
 [[packaging#Packaging#Station Installer#The launchd On-Demand Gate|no plist change clears it]].
 
 Three things are deliberately out of scope. There is no build-from-source or side-load path,
-because the agent ships only as a signed, notarized `.pkg` attached to a `vX.Y.Z` release and the
-separate updater accepts only that release chain. The agent never updates itself; automatic
-package replacement belongs to
-[[operations#Station Operations#Auto-Update Decision]]. Nothing CI already proves is repeated as
-an operator step. And no individual station's evidence trail is kept here.
+because the agent ships only as a signed, notarized `.pkg` attached to a `vX.Y.Z` release. The
+agent never updates itself, and neither does anything else on the station
+([[operations#Station Operations#No Automatic Updates]]). Nothing CI already proves is repeated
+as an operator step. And no individual station's evidence trail is kept here.
 
 ## Migrating From A Predecessor Agent
 
@@ -80,149 +79,28 @@ checklist below. Whether that hardware half has been run yet is a status that ch
 design fact, so the runbook's rollback note is its single home and this section does not restate
 it — consistent with
 [[operations#Station Operations#Station Validation Checklist#The Checklist Is Not A Run Log|the graph carrying no run results]],
-running item 11 updates that one note and nothing here. A manually rolled-back station is pinned
-first, then stays put until an admin resumes the updater. When maintainers move the latest
-manifest back instead, the updater performs the same downgrade automatically. In both cases the
-no-downgrade-guard package path remains the mechanism.
+running item 11 updates that one note and nothing here. A rolled-back station stays put until an
+admin installs something newer; nothing moves it on its own.
 Rolling back to a version that shipped under a *different* product name is not a rollback at all
 but a migration in the other direction, and it meets the same port-freedom hard failure.
 
-## Auto-Update Decision
+## No Automatic Updates
 
-Auto-update ships as a separate root updater that keeps stations current while the agent itself
-never updates itself.
+Nothing on a station updates itself, and nothing on a station has network egress. Upgrading and
+rolling back are the same operation — one package install run by an admin — and the product has
+no second process, no root daemon, and no release feed.
 
-The decision (beads issue `zebra-mac-agent-egp`) splits the product in two. The agent stays
-exactly as it is — an unprivileged LaunchAgent, loopback-only, zero outbound network, no update
-routes — and updating becomes the job of a separate root daemon. The frozen wire contract, the
-`Device` shape, and the no-downgrade-guard install-over-install path of
-[[operations#Station Operations#Rollback Path]] are all untouched, and pinning a station stays one
-command: `sudo launchctl disable system/<updater-label>`. Phase 1, release-side manifest and
-checksum assets, phase 2, updater daemon plus runbook, and phase 3, `/health` update visibility,
-are shipped without changing the frozen device or request shapes.
-
-### The Adopted Updater Shape
-
-A short-lived root updater script, run by its own system-domain LaunchDaemon, downloads, verifies,
-and installs the release the published manifest names, then proves the install with a health probe
-or rolls it back.
-
-The updater is a POSIX shell script shipped as a `packaging/*.in` template rendered from
-`packaging/identity.sh` — the same convention as `launcher.sh.in`
-([[packaging#Packaging#Packaging Identity#Rendered Packaging Templates]]) — installed under
-`libexec/` and run by its own root LaunchDaemon label in the system domain with `RunAtLoad`.
-Production uses a `StartCalendarInterval` of `Minute 0` — hourly, on the hour — and 0-300 seconds
-(up to 5 minutes) of per-run jitter, which is what stops a fleet all firing at `:00` from arriving
-together. The calendar key is chosen over `StartInterval` for one reason: `launchd.plist(5)` says a
-`StartInterval` firing that falls while the system is asleep is missed outright, while a
-`StartCalendarInterval` job starts when the machine next wakes, coalescing missed intervals into
-one. A station that sleeps overnight would otherwise wake and wait a further full interval, and
-`RunAtLoad` does not cover it because waking is not loading. The hour was chosen over a day because the cost of a check is one conditional-sized fetch
-of a ~120-byte static asset from a CDN-backed URL, so raising the frequency 24-fold buys a 24-fold
-cut in worst-case staleness for traffic nobody can measure — the cheapest available substitute for
-a push channel these unmanaged stations cannot have
-([[operations#Station Operations#Auto-Update Decision#Rejected Alternatives]]). The `v0.3.0`
-release-validation baseline temporarily used a 60-second interval and 0-5
-seconds of jitter so `v0.3.1` could prove automatic replacement without a day-long wait; `v0.3.1`
-restores the production values. An automatic install replaces the plist but deliberately leaves
-the updater that invoked it loaded, so launchd retains `v0.3.0`'s 60-second schedule until reboot
-or an explicit system-domain bootout/bootstrap. Short-lived runs mean each exec of whatever is on
-disk, so the classic self-update race — a
-postinstall booting out the process that spawned `installer` — cannot occur, and
-[[packaging#Packaging#Station Installer#The launchd On-Demand Gate]] does not apply to it, being
-a `gui`-domain condition on a job the system domain never sees.
-
-Each run needs a console user, because `postinstall` requires one, and waits up to 300 seconds for
-one rather than testing once. That wait is what makes `RunAtLoad` mean anything: launchd starts
-the job at boot while `/dev/console` still belongs to `root`, so a single test would make every
-boot check exit as `skipped-no-user` and a reboot could never force a check. A station parked at
-the login window still gives up and waits for the next interval instead of holding a process open.
-A reboot is therefore the supported way to force a check; a logout and login is not, because a
-system-domain LaunchDaemon is not reloaded by a user session. Otherwise the run
-fetches `update-manifest.txt` from the stable `releases/latest/download/…` URL and compares its
-`version`, `asset`, and `sha256` records against the installed receipt via `pkgutil --pkg-info`.
-The byte-exact format is owned by
-[[infrastructure#Infrastructure#Release Chain#Asset Retention]]. The manifest is the truth: it
-installs whenever the manifest version *differs* from the installed one, not only when it is newer
-— so yanking a bad release (marking it prerelease on GitHub) automatically rolls the fleet back
-to the previous good build, turning asset retention into a fleet-healing mechanism.
-
-Verification is explicit, because a CLI `installer` bypasses Gatekeeper entirely. The sha256 from
-the manifest is the primary gate. `pkgutil --check-signature` checks the Developer ID Team ID,
-pinned at runtime from the `codesign` info of the currently installed binary — trust on first
-install, so no Team ID string ever lands in this repository and
-[[infrastructure#Infrastructure#Naming Gate|the naming gate]] stays clean. And the updater sets
-`com.apple.quarantine` on the downloaded package explicitly and requires
-`spctl --assess --type install` to report Notarized Developer ID — reproducing the release
-chain's own quarantine-bit-set assessment
-([[infrastructure#Infrastructure#Release Chain#Signing Chain Facts]]), so the update channel
-never weakens the Gatekeeper contract.
-
-Install is `installer -pkg … -target /` with the rendered target-user environment variable set to
-the console user. Afterwards the updater probes `GET /health` until `X-Print-Agent-Version`
-matches the manifest ([[tools#Print Agent#Version And Health Surface]]); on failure it reinstalls
-the cached previous `.pkg` and quarantines the failed version in a state file so it is never
-retried. Before the first replacement, that cache is populated from the installed version's
-retained release assets and put through the same digest, signature, Team ID, quarantine, and
-notarization gates. A successful update replaces the cache with the now-proven current package.
-It logs to `/Library/Logs/<product>/update.log`.
-
-Observability keeps the agent at zero egress: the updater atomically publishes a sanitized status
-file outside its mode-700 private state, and `/health` — an additive diagnostics surface, not part
-of the frozen wire contract — exposes it only after strict bounded parsing. Pin state comes live
-from `launchctl print-disabled system`, because a disabled updater cannot rewrite a file after the
-one-command pin. If either source cannot prove its state, `update` is omitted rather than stale or
-fabricated. The frozen `Device` object is untouched. On the release side the
-tag-only trigger ([[infrastructure#Infrastructure#Release Chain#Trigger Surface]]) is preserved:
-each release additionally uploads `<pkg>.sha256` and `update-manifest.txt` as assets and marks
-the release `--latest` explicitly.
-
-### Rejected Alternatives
-
-Seven other update stories were considered and rejected, each on a property this product cannot
-give up. Recording them is part of the decision itself.
-
-**Staying manual-only** scales with station count and depends on someone noticing a station is
-behind; a station can sit on a defective build indefinitely.
-
-**Sparkle** requires an `.app` bundle the product does not have, and Sparkle's own documentation
-states that package installs always require user authorization — silent daemon updates are
-impossible with it.
-
-**The agent updating itself** fails on privilege and on exposure: the agent is unprivileged, and
-an updater inside it would bolt the product's first outbound network path plus a
-web-page-reachable trigger onto an unauthenticated loopback service.
-
-**MDM- or Munki-only management** assumes managed stations, and these stations are unmanaged;
-a managed fleet instead gets the one-command pin as its opt-out.
-
-**Polling the GitHub REST API** costs 60 requests per hour shared across a NAT IP and a
-JSON-parsing dependency; the `releases/latest/download` redirect needs neither.
-
-**A push channel** has no delivery mechanism here. Device-level APNs requires MDM enrollment these
-stations do not have, and the updater is a shell-script LaunchDaemon with no bundle and no push
-entitlement. A self-hosted socket — WebSocket, SSE, or MQTT — would deliver it, but at the price of
-this product's first service backend, whose uptime would replace GitHub's CDN as the single point
-of failure in the update path. It would also end the short-lived process model that makes the
-self-update race impossible, restore `KeepAlive` in a repository already bitten by launchd respawn
-semantics ([[packaging#Packaging#Station Installer#The launchd On-Demand Gate]]), and stand a
-persistent outbound root connection on every station where there is currently one periodic fetch
-of a signed, checksummed static file. Since any push channel that must not miss an event still
-needs a reconciliation poll, push would be added to polling rather than replace it. A one-hour
-interval is the substitute, and MDM enrollment — not a bespoke socket — is the migration that would
-make real push available, at which point the updater is deleted rather than extended.
-
-**A user-facing manual check button** was specified and abandoned. Its findings are kept in
-`specs/001-manual-update-check/spec.md` because they remain true of any future attempt: the
-one-command pin may not survive a launchd demand-start, a world-writable trigger reproduces the
-same local-actor capability used to reject the agent-side route, the payload's first `.app` bundle
-brings unproven notarization and relocatable-bundle handling, and a click that lands mid-shift
-bounces the print agent under whoever is printing. The hourly interval removed the latency that
-motivated it.
+This fork removed the upstream root updater deliberately. A system-domain LaunchDaemon that
+downloads and runs `installer` every hour is a standing root code-execution path pinned to one
+maintainer's Apple identity and one GitHub repository; for a single station that is more trust
+than the convenience buys. The frozen wire contract, the `Device` shape, and the no-downgrade-guard
+install-over-install path of [[operations#Station Operations#Rollback Path]] are exactly what make
+manual upgrades cheap enough to live with: install the newer package, or the older one, and
+nothing has to be removed first.
 
 ## Station Validation Checklist
 
-Thirteen items run once per station type, on a real Mac with a real label printer, before any shift
+Twelve items run once per station type, on a real Mac with a real label printer, before any shift
 depends on the agent. The checklist exists exactly where automated coverage stops.
 
 [[tests#Tests#Agent Core]] states that boundary from the other side: the recording fake proves the
@@ -230,9 +108,9 @@ agent's reaction to a state, never that the state occurs. A USB bus re-enumerati
 device URI, a powered-but-unresponsive printer stalling `lpstat`, a ~540 KB `^GFA` payload
 rendering on media, a Gatekeeper verdict on a notarized package, launchd bringing the agent back
 from a `kill -9` — each needs a station, a printer, and a person. The checklist is the list of
-those, and its named setup (a Mac that still has Zebra Browser Print installed, a USB printer, a
-second printer on the network, the previous release's package already downloaded) is chosen so
-removal, failover and downgrade are genuinely exercised instead of assumed.
+those, and its named setup (a Mac with Zebra Browser Print quit or uninstalled beforehand, a USB
+printer, a second printer on the network, the previous release's package already downloaded) is
+chosen so the port refusal, failover and downgrade are genuinely exercised instead of assumed.
 
 Two of the items exist because a station found what review did not. Item 10 checks BOTH uninstall
 entry points rather than one, after a single unbounded `pkill -f` pattern in the shared removal

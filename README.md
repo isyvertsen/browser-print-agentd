@@ -5,8 +5,7 @@
 Some web apps print labels by talking to a small helper program running on your own computer.
 Zebra ships one for that job; this is a drop-in replacement for Macs that do not have it. You
 install it once and label printing starts working in the browser — there is no account to create,
-no window to keep open, and nothing to set up afterwards. It runs quietly in the background and
-keeps itself up to date.
+no window to keep open, and nothing to set up afterwards. It runs quietly in the background.
 
 It only ever talks to your own Mac and to the printers already configured on it. It is not a
 network service, nothing on the internet can reach it, and your labels are never sent anywhere.
@@ -37,7 +36,8 @@ A few things worth knowing:
 - **The label printer must already be set up on this Mac.** This agent prints to the printers your
   Mac already has; it does not add them for you.
 - **If the installer stops and mentions port 9100 or 9101**, another label-printing program is
-  already running and has to be removed first — see
+  already running and has to be quit or uninstalled first — the installer never removes other
+  software for you. Zebra Browser Print is the usual one; see
   [the runbook](./RUNBOOK.md#migrating-from-another-localhost-print-agent).
 
 That link always points at the newest release. Every installer is signed and notarized by Apple,
@@ -45,16 +45,9 @@ so macOS will open it without warnings.
 
 ## Updates
 
-The agent updates itself. It checks for a new version every hour and installs one in the
-background when it finds it — you are never asked anything. Installing an update takes a few
-seconds, during which printing is briefly unavailable. If the Mac was asleep at the top of the
-hour, the check happens when it wakes.
-
-**To force a check, restart the Mac.** Logging out and back in does not do it.
-
-Administrators: the update cadence, how to pin a station to its current build, what the updater
-verifies before installing anything, and how to roll a station back are all in
-[`RUNBOOK.md`](./RUNBOOK.md#managing-automatic-updates).
+The agent does not update itself and never makes a network request. To upgrade, download and
+run a newer installer over the existing one; to downgrade, run an older one. Either way it is a
+normal install and nothing has to be removed first.
 
 ## Uninstall
 
@@ -62,8 +55,8 @@ The installer puts an uninstaller on the Mac. Open **Uninstall Browser Print Age
 Applications — Spotlight finds it too — confirm, and enter your Mac password when asked. There is
 nothing to download.
 
-It removes all of it — both launchd jobs and their plists, the binary, the launcher, updater state
-and cache, keychain trust (matched by SHA-1 fingerprint, never by name), the certificate and log
+It removes all of it — the launchd job and its plist, the binary, the launcher,
+keychain trust (matched by SHA-1 fingerprint, never by name), the certificate and log
 directories, the installer receipt, and itself. It deletes the log ring too, so copy that directory
 first if you are uninstalling because something was wrong.
 
@@ -80,39 +73,30 @@ of the command above.
 
 Everything below is root work the package scripts do for you:
 
-- **`preinstall`** removes any prior install of **this** agent, removes a path-matched Zebra
-  Browser Print install if one is present, and then proves ports 9100 and 9101 are actually free.
-  Anything else holding those ports — including a differently-named localhost print agent — would
-  make a `KeepAlive` agent crash-loop, so the install stops loudly instead.
+- **`preinstall`** stops any prior install of **this** agent and then proves ports 9100 and 9101
+  are actually free. It never removes software it did not install. Anything holding those ports —
+  Zebra Browser Print, or a differently-named localhost print agent — would make a `KeepAlive`
+  agent crash-loop, so the install stops loudly and tells you to quit or uninstall it yourself.
 - **`postinstall`** generates or reuses a per-station self-signed cert pair (CN/SAN `localhost`,
   EKU `serverAuth`) under `~/Library/Application Support/browser-print-agentd/`, bootstraps the
   LaunchAgent into `gui/<uid>`, and proves both listeners are ready. It then uses a normal
   `https://localhost:9101/available` request as the trust check: working **System** keychain trust
   is left untouched, while a first install adds SSL-only trust and requires that same request to
-  succeed. It finally registers the separate root updater. A failed HTTP, HTTPS, or trust probe
-  **fails the install**.
+  succeed. A failed HTTP, HTTPS, or trust probe **fails the install**.
 
 Installed layout:
 
-| Path                                                                               | What                              |
-| ---------------------------------------------------------------------------------- | --------------------------------- |
-| `/usr/local/bin/browser-print-agentd`                                              | the agent binary                  |
-| `/usr/local/bin/browser-print-agentd-uninstall`                                    | the uninstaller                   |
-| `/Applications/Uninstall Browser Print Agent.app`                                  | GUI front end for the uninstaller |
-| `/usr/local/libexec/browser-print-agentd/launcher`                                 | agent launchd entry point         |
-| `/usr/local/libexec/browser-print-agentd/updater`                                  | short-lived root updater          |
-| `/Library/LaunchAgents/io.github.sharaf-nassar.browser-print-agentd.plist`         | per-user LaunchAgent              |
-| `/Library/LaunchDaemons/io.github.sharaf-nassar.browser-print-agentd.updater.plist` | root updater LaunchDaemon         |
-| `~/Library/Application Support/browser-print-agentd/`                              | `cert.pem` and `key.pem`          |
-| `~/Library/Logs/browser-print-agentd/`                                             | private, bounded per-user log ring |
-| `/Library/Application Support/browser-print-agentd/update-status`                  | sanitized updater diagnostics     |
-| `/Library/Application Support/browser-print-agentd/updater/`                       | updater cache and state           |
-| `/Library/Logs/browser-print-agentd/update.log`                                    | updater verification/install log |
+| Path                                                                       | What                               |
+| -------------------------------------------------------------------------- | ---------------------------------- |
+| `/usr/local/bin/browser-print-agentd`                                      | the agent binary                   |
+| `/usr/local/bin/browser-print-agentd-uninstall`                            | the uninstaller                    |
+| `/Applications/Uninstall Browser Print Agent.app`                          | GUI front end for the uninstaller  |
+| `/usr/local/libexec/browser-print-agentd/launcher`                         | agent launchd entry point          |
+| `/Library/LaunchAgents/io.github.sharaf-nassar.browser-print-agentd.plist` | per-user LaunchAgent               |
+| `~/Library/Application Support/browser-print-agentd/`                      | `cert.pem` and `key.pem`           |
+| `~/Library/Logs/browser-print-agentd/`                                     | private, bounded per-user log ring |
 
-The updater's public status file is root-owned mode 644 beneath a root-owned mode-755 support
-directory. The rollback cache, quarantine list, and detailed last-run state remain in the mode-700
-`updater/` child. Pin state is never copied into a stale file: `/health` reads launchd live,
-because a disabled updater cannot run again to rewrite its own publication.
+Nothing runs as root after the installer exits, and nothing on the machine has network egress.
 
 ## Configuration
 
@@ -194,7 +178,7 @@ them answers those paths with the plain-text `404` its default arm has always pr
 | `GET`  | `/default`    | one `Device` object, or an **empty body** when nothing is healthy (an empty JSON object here would break callers)         |
 | `POST` | `/write`      | spools `{"data": "<raw ZPL>"}` to the requested (or resolved) printer; empty `200` on success, plain-text body on failure |
 | `POST` | `/read`       | empty `200` — dead surface for most callers, kept so the agent stays a drop-in                                            |
-| `GET`  | `/health`     | **additive** diagnostics: running version, origin posture, every queue's health, and updater status when safely available |
+| `GET`  | `/health`     | **additive** diagnostics: running version, origin posture, and every queue's health                                      |
 | `POST` | `/print-pdf`  | **additive**: spools `{"data": "<base64 PDF>"}` as a rendered document; same `200`/plain-text convention as `/write`      |
 
 `OPTIONS` on any path answers the CORS preflight with `204`.
@@ -219,14 +203,6 @@ bridge between the local browser and local CUPS, never a network service.
 `X-Print-Agent-Version`. That header and `GET /health` are the *only* places the running version
 is reported: the `Device` shape must never grow a version field, because callers parse and pin
 it. A binary built any way other than a tagged release reports `dev`.
-
-**Update diagnostics.** When the packaged root updater has published valid local state,
-`GET /health` adds an `update` object with its last-check time and outcome, the latest strictly
-validated manifest version, whether that version is quarantined, and whether launchd currently
-pins the updater disabled. The print agent makes no network request for this: it reads one
-sanitized root-owned file and launchd's local disabled-state dictionary. Missing, malformed,
-unsafe, or unprovable state omits `update` entirely. A check that ended before manifest
-validation omits `latestVersion` and `quarantined` rather than guessing.
 
 **Origin posture.** With no `--origin-allow` configured the agent is `log-and-allow`: every
 origin is recorded and permitted. Configure an allowlist and both print routes — `/write` and
