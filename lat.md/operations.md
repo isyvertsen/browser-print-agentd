@@ -22,8 +22,8 @@ then install the pending macOS update and reboot, because
 
 Three things are deliberately out of scope. There is no build-from-source or side-load path,
 because the agent ships only as a signed, notarized `.pkg` attached to a `vX.Y.Z` release. The
-agent never updates itself, and neither does anything else on the station
-([[operations#Station Operations#No Automatic Updates]]). Nothing CI already proves is repeated
+agent never updates itself; whether the package does is a build-time choice
+([[operations#Station Operations#Signed Updates From A Feed You Choose]]). Nothing CI already proves is repeated
 as an operator step. And no individual station's evidence trail is kept here.
 
 ## Migrating From A Predecessor Agent
@@ -80,23 +80,36 @@ design fact, so the runbook's rollback note is its single home and this section 
 it — consistent with
 [[operations#Station Operations#Station Validation Checklist#The Checklist Is Not A Run Log|the graph carrying no run results]],
 running item 11 updates that one note and nothing here. A rolled-back station stays put until an
-admin installs something newer; nothing moves it on its own.
+admin installs something newer, or — on a package built with a signing key — until the feed's
+manifest names a different version, and pinning the updater is what keeps it there.
 Rolling back to a version that shipped under a *different* product name is not a rollback at all
 but a migration in the other direction, and it meets the same port-freedom hard failure.
 
-## No Automatic Updates
+## Signed Updates From A Feed You Choose
 
-Nothing on a station updates itself, and nothing on a station has network egress. Upgrading and
-rolling back are the same operation — one package install run by an admin — and the product has
-no second process, no root daemon, and no release feed.
+The updater is optional at build time, polls a URL fixed at build time, and installs only what a
+manifest signed with the operator's own key names. The agent itself still has zero egress.
 
-This fork removed the upstream root updater deliberately. A system-domain LaunchDaemon that
-downloads and runs `installer` every hour is a standing root code-execution path pinned to one
-maintainer's Apple identity and one GitHub repository; for a single station that is more trust
-than the convenience buys. The frozen wire contract, the `Device` shape, and the no-downgrade-guard
-install-over-install path of [[operations#Station Operations#Rollback Path]] are exactly what make
-manual upgrades cheap enough to live with: install the newer package, or the older one, and
-nothing has to be removed first.
+Upstream always shipped a root LaunchDaemon that installed whatever GitHub's latest release
+said, and its trust anchor was Apple: the package had to be signed by the Team ID of the installed
+binary and notarized. That is a standing root code-execution path pinned to one maintainer's
+Apple identity and one GitHub repository. The fork keeps the mechanism — short-lived root job,
+hourly with jitter, console-user wait, SHA-256, rollback cache, quarantine — and moves the trust
+anchor to something the operator owns: an Ed25519 key whose public half ships in the package as
+an `allowed_signers` file, checked with `ssh-keygen -Y verify`, which every macOS already has.
+`packaging/allowed_signers` with no key line builds a package with no updater at all, so a
+checkout is safe by default and the feed is opted into by putting a key there.
+
+The feed is whatever `UPDATE_BASE_URL` was when the package was built, laid out like GitHub
+Releases (`latest/download/…` and `download/vX.Y.Z/…`); the default is this repository's
+releases, and a private build points at a file server the operator controls. TLS to it is
+transport only. The Apple layer is kept as a second gate whenever the installed binary carries a
+Team ID, and skipped — loudly, in the log — when it does not, so an unsigned build and a
+notarized one run the same script. The release workflow signs the manifest from a secret and
+verifies it against the checked-in `allowed_signers` before publishing, so a rotated secret that
+was not mirrored into the repository fails the release rather than every station an hour later.
+[[operations#Station Operations#Rollback Path]] is unchanged: any difference between manifest and
+receipt installs, so moving the feed back rolls stations back.
 
 ## Station Validation Checklist
 

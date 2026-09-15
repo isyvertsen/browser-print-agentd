@@ -97,10 +97,12 @@ type driverChecker struct {
 	entries map[string]driverEntry
 }
 
-// driverEntry is one cached driver verdict and when it was taken.
+// driverEntry is one cached driver identity and when it was taken. The
+// inverting verdict and the printer-match test are both derived from the same
+// probe, so the model string is what is cached rather than either answer.
 type driverEntry struct {
-	at        time.Time
-	inverting bool
+	at    time.Time
+	model string
 }
 
 // newDriverChecker builds a checker over cups with the default cache TTL.
@@ -124,21 +126,30 @@ func newDriverChecker(cups *cupsClient) *driverChecker {
 // already is. Only a positively
 // identified inverting driver gets rotated.
 func (d *driverChecker) inverting(ctx context.Context, queue string) bool {
+	return invertingDriver(d.model(ctx, queue))
+}
+
+// model reports the queue's driver identity as `lpoptions` publishes it, or
+// "" when the probe failed or the queue publishes none. Cached for
+// driverCacheTTL like the verdicts built on it.
+func (d *driverChecker) model(ctx context.Context, queue string) string {
 	now := d.now()
 	d.mu.Lock()
 	entry, cached := d.entries[queue]
 	d.mu.Unlock()
 	if cached && now.Sub(entry.at) < d.ttl {
-		return entry.inverting
+		return entry.model
 	}
 
 	model, err := d.cups.driverModel(ctx, queue)
-	inverting := err == nil && invertingDriver(model)
+	if err != nil {
+		model = ""
+	}
 
 	d.mu.Lock()
-	d.entries[queue] = driverEntry{at: d.now(), inverting: inverting}
+	d.entries[queue] = driverEntry{at: d.now(), model: model}
 	d.mu.Unlock()
-	return inverting
+	return model
 }
 
 // healthyPrinters filters printers down to the ones that can print, preserving

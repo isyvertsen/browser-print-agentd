@@ -26,7 +26,14 @@ type agentLogger struct {
 	out    io.Writer
 	closer io.Closer
 	now    func() time.Time
+
+	// recent keeps the last recentLogLines records in memory for the status
+	// page, so "what just happened" is answerable without opening the file.
+	recent []string
 }
+
+// recentLogLines bounds the in-memory tail the status page shows.
+const recentLogLines = 40
 
 // newAgentLogger writes to out.
 func newAgentLogger(out io.Writer) *agentLogger {
@@ -53,6 +60,10 @@ func (l *agentLogger) write(line string) {
 	defer l.mu.Unlock()
 	record := []byte(fmt.Sprintf("%s %s\n",
 		l.now().UTC().Format(time.RFC3339), line))
+	l.recent = append(l.recent, strings.TrimSuffix(string(record), "\n"))
+	if len(l.recent) > recentLogLines {
+		l.recent = l.recent[len(l.recent)-recentLogLines:]
+	}
 	n, err := l.out.Write(record)
 	if err != nil || n != len(record) {
 		if err == nil {
@@ -112,6 +123,16 @@ func (l *agentLogger) job(
 		"%s %s bytes=%d uid=%s queue=%s connection=%s lp=%s origin=%s",
 		action, status, byteCount, target.UID, target.Queue, target.Connection, detail,
 		originField(origin)))
+}
+
+// tail returns the most recent records, newest last.
+func (l *agentLogger) tail() []string {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string{}, l.recent...)
 }
 
 // originField renders an absent Origin header as "-" so the field is always

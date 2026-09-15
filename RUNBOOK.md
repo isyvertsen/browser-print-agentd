@@ -18,6 +18,7 @@ run by an admin, on purpose.
 - [Releases and where the installers live](#releases-and-where-the-installers-live)
 - [Installing on a station](#installing-on-a-station)
 - [Station configuration](#station-configuration)
+- [Managing automatic updates](#managing-automatic-updates)
 - [Migrating from another localhost print agent](#migrating-from-another-localhost-print-agent)
 - [Rolling back to the previous release](#rolling-back-to-the-previous-release)
 - [Uninstalling](#uninstalling)
@@ -67,7 +68,7 @@ convenience.** Do not rename it, and do not ship a release without it.
 GitHub serves a version-free redirect for whichever release is marked latest:
 
 ```text
-https://github.com/sharaf-nassar/browser-print-agentd/releases/latest/download/browser-print-agentd.pkg
+https://github.com/isyvertsen/browser-print-agentd/releases/latest/download/browser-print-agentd.pkg
 ```
 
 That URL answers `302` and lands on the newest release's notarized installer. The
@@ -99,7 +100,7 @@ different code path):
 
 ```bash
 env -u GITHUB_TOKEN -u GH_TOKEN curl -sIL \
-  https://github.com/sharaf-nassar/browser-print-agentd/releases/latest/download/browser-print-agentd.pkg \
+  https://github.com/isyvertsen/browser-print-agentd/releases/latest/download/browser-print-agentd.pkg \
   | grep -Ei '^(HTTP/|location:)'
 ```
 
@@ -108,12 +109,12 @@ Expect a `302` chain ending in `200`, with a `location:` naming the newest relea
 List what is currently downloadable:
 
 ```bash
-gh release list --repo sharaf-nassar/browser-print-agentd --limit 20
-gh release view v1.3.0 --repo sharaf-nassar/browser-print-agentd \
+gh release list --repo isyvertsen/browser-print-agentd --limit 20
+gh release view v1.3.0 --repo isyvertsen/browser-print-agentd \
   --json assets --jq '.assets[] | "\(.name)\t\(.size) bytes"'
 ```
 
-The [releases page](https://github.com/sharaf-nassar/browser-print-agentd/releases) is the same
+The [releases page](https://github.com/isyvertsen/browser-print-agentd/releases) is the same
 list in a browser, and is the only supported install source.
 
 ## Installing on a station
@@ -141,7 +142,7 @@ LaunchAgent — happens inside the package's `preinstall` and
 ### 1. Download the release installer
 
 ```bash
-gh release download v<version> --repo sharaf-nassar/browser-print-agentd \
+gh release download v<version> --repo isyvertsen/browser-print-agentd \
   --pattern 'browser-print-agentd-*.pkg' --dir ~/Downloads
 ```
 
@@ -205,7 +206,7 @@ Machine-wide payload:
 | `/usr/local/bin/browser-print-agentd` | print agent binary |
 | `/usr/local/bin/browser-print-agentd-uninstall` | complete uninstaller |
 | `/usr/local/libexec/browser-print-agentd/launcher` | per-user agent entry point |
-| `/Library/LaunchAgents/io.github.sharaf-nassar.browser-print-agentd.plist` | per-user print job |
+| `/Library/LaunchAgents/io.github.isyvertsen.browser-print-agentd.plist` | per-user print job |
 
 The cert and agent log remain per-account under
 `~/Library/Application Support/browser-print-agentd/` and
@@ -218,7 +219,7 @@ curl -fsS  http://127.0.0.1:9100/health       # version + every queue, healthy o
 curl -fsS  http://127.0.0.1:9100/available    # what the caller will be offered, healthy only
 curl -fsSk https://127.0.0.1:9101/available   # Safari path; only served when the cert exists
 curl -fsS  https://localhost:9101/available   # Safari trust path; intentionally no -k
-launchctl print gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd | head -20
+launchctl print gui/$(id -u)/io.github.isyvertsen.browser-print-agentd | head -20
 ```
 
 Then print one real label from the page that drives the printer. `postinstall` already refused to
@@ -235,21 +236,38 @@ that warning; re-running the installer is the supported repair.
 
 ### Per-station configuration
 
-`/Library/LaunchAgents/io.github.sharaf-nassar.browser-print-agentd.plist` is the only
-configuration surface. Ports and bind address live in `ProgramArguments`; to lock the print routes
-(`/write` and `/print-pdf`) to one origin, append two more strings — `--origin-allow` and the
-allowed origin — then reload:
+There are two configuration surfaces, and the one an operator touches needs no admin rights.
+
+**The origin allowlist** lives at
+`~/Library/Application Support/browser-print-agentd/allowed-origins.txt`, one origin per line,
+`#` comments allowed. `postinstall` writes a commented, empty template there — or seeds it from
+`BROWSER_PRINT_AGENTD_ORIGIN_ALLOW` in the installer's environment for an unattended install.
+**Nothing prints until an origin is in it.** The agent re-reads the file within a couple of seconds
+of a change, so adding the web app is:
 
 ```bash
-sudo launchctl bootout gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd
+echo 'https://labels.example.com' >> ~/Library/Application\ Support/browser-print-agentd/allowed-origins.txt
+curl -s http://127.0.0.1:9100/health | grep -o '"originPosture":"[^"]*"'   # expect "allowlist"
+```
+
+A lone `*` in the file restores upstream's allow-everything posture. Do not do that on a station
+that browses the web.
+
+**The LaunchAgent plist**, `/Library/LaunchAgents/io.github.isyvertsen.browser-print-agentd.plist`,
+is root-owned and holds everything else in `ProgramArguments`: ports, bind address, an optional
+static `--origin-allow` list that merges with the file, `--origins-file` to move the file, and
+`--printer-match` to change which CUPS queues count as label printers (a regexp over queue name,
+device URI and driver identity; the default matches Zebra, and `.` offers every queue). After an
+edit, reload:
+
+```bash
+sudo launchctl bootout gui/$(id -u)/io.github.isyvertsen.browser-print-agentd
 sudo launchctl bootstrap gui/$(id -u) \
-  /Library/LaunchAgents/io.github.sharaf-nassar.browser-print-agentd.plist
+  /Library/LaunchAgents/io.github.isyvertsen.browser-print-agentd.plist
 ```
 
 Every flag also has an environment mirror (`BROWSER_PRINT_AGENTD_BIND`, `…_PORT`, `…_HTTPS_PORT`,
-`…_CERT_DIR`, `…_ORIGIN_ALLOW`); a flag always wins. Leaving `--origin-allow` out is the default
-posture: every origin is **logged and allowed**. Which printer to use is not configurable at all —
-the agent discovers queues from CUPS.
+`…_CERT_DIR`, `…_ORIGIN_ALLOW`, `…_ORIGINS_FILE`, `…_PRINTER_MATCH`); a flag always wins.
 
 ### Adding a printer queue
 
@@ -265,6 +283,93 @@ lpstat -v          # confirm the device URI the agent will hash into the uid
 
 `lpadmin -m raw` exits 1 with `Raw queues are no longer supported on macOS.` The `zebra.ppd` queue
 is correct because the agent always spools with `lp -o raw`, which bypasses the filter.
+
+## Managing automatic updates
+
+A package built from a checkout whose `packaging/allowed_signers` holds no key carries **no
+updater**: nothing on the station ever checks for a release, and upgrading is a newer installer
+run by hand. Everything below applies only to a package built with a key.
+
+### What the updater is
+
+A short-lived root LaunchDaemon, `io.github.isyvertsen.browser-print-agentd.updater`, runs at load
+and hourly on the hour with up to five minutes of jitter, and exits. Each run:
+
+1. fetches `latest/download/update-manifest.txt` and `update-manifest.txt.sig` from the feed URL
+   baked into the package at build time;
+2. verifies the signature with `ssh-keygen -Y verify` against
+   `/usr/local/libexec/browser-print-agentd/allowed_signers` — a manifest that does not verify is
+   discarded before any field of it is read;
+3. compares the manifest's version with the installed receipt; **any difference installs**, not
+   only a higher version, so moving the feed back to an older release rolls stations back;
+4. downloads the named package and checks its SHA-256 against the signed manifest;
+5. if the installed binary is Developer ID signed, additionally requires the package to be signed
+   by the same Team ID and notarized; an unsigned build logs that it is relying on the manifest;
+6. caches a verified copy of the *current* release first, installs, probes `/health` until the
+   new version answers, and on failure reinstalls the cached package and quarantines the version.
+
+It logs to `/Library/Logs/browser-print-agentd/update.log` and publishes a one-line status to
+`/Library/Application Support/browser-print-agentd/update-status`.
+
+### Pin or resume a station
+
+```bash
+sudo launchctl disable system/io.github.isyvertsen.browser-print-agentd.updater   # pin
+sudo launchctl enable  system/io.github.isyvertsen.browser-print-agentd.updater   # resume
+sudo launchctl kickstart system/io.github.isyvertsen.browser-print-agentd.updater # check now
+```
+
+The pin is a launchd override and survives package upgrades. A reboot also forces a check;
+logging out and in does not.
+
+### Running your own feed
+
+The feed is a static directory. Any HTTPS file server works — nginx, Caddy, S3, or a directory
+behind Cloudflare Tunnel, which needs no open inbound port and no certificate of your own. Lay it
+out exactly as GitHub Releases does, because that is the shape the updater expects:
+
+```text
+latest/download/update-manifest.txt
+latest/download/update-manifest.txt.sig
+latest/download/browser-print-agentd-X.Y.Z.pkg
+download/vX.Y.Z/browser-print-agentd-X.Y.Z.pkg
+download/vX.Y.Z/browser-print-agentd-X.Y.Z.pkg.sha256
+```
+
+Keep every `download/vX.Y.Z/` directory: the updater downloads the *current* version from there as
+its rollback cache before it will replace anything. Serve `update-manifest.txt` with
+`Cache-Control: no-store` if a CDN sits in front, or stations will keep seeing the old version.
+
+Build the package for that feed with the URL set at build time:
+
+```bash
+UPDATE_BASE_URL=https://updates.example.no/browser-print-agentd packaging/build-pkg.sh --version X.Y.Z
+```
+
+Sign the manifest with the same key whose public half is in `packaging/allowed_signers`:
+
+```bash
+printf 'version=%s\nasset=%s\nsha256=%s\n' X.Y.Z browser-print-agentd-X.Y.Z.pkg "$(shasum -a 256 browser-print-agentd-X.Y.Z.pkg | cut -c1-64)" > update-manifest.txt
+ssh-keygen -Y sign -f release-signing-key -n browser-print-agentd-release update-manifest.txt
+```
+
+### Updater troubleshooting
+
+```bash
+sudo tail -50 /Library/Logs/browser-print-agentd/update.log
+cat /Library/Application\ Support/browser-print-agentd/update-status
+sudo launchctl print-disabled system | grep browser-print-agentd.updater
+```
+
+| Status | Meaning |
+| ------ | ------- |
+| `current` / `updated` | Nothing to do, or the install and version probe succeeded. |
+| `skipped-no-user` | Nobody was logged in at the console; the next run checks again. |
+| `manifest-fetch-failed` / `signature-fetch-failed` / `package-fetch-failed` | The feed was unreachable. Nothing changed. |
+| `signature-invalid` | The manifest is not signed by a key in `allowed_signers`. Nothing changed. Check the key in the release pipeline before anything else. |
+| `no-signer` | The package shipped an updater but no `allowed_signers`; it refuses to run. Rebuild the package. |
+| `checksum-failed` / `trust-failed` | The package did not match the signed manifest, or failed the Apple signature check. Nothing changed. Do not bypass it. |
+| `rolled-back` / `rollback-failed` / `quarantined` | The new version failed its health probe. The previous package was restored (or not); the version will not be retried. |
 
 ## Migrating from another localhost print agent
 
@@ -359,8 +464,8 @@ string.** Identify it by where it lives:
 | What to check      | Command                                                             | This agent                                       |
 | ------------------ | ------------------------------------------------------------------- | ------------------------------------------------ |
 | Binary on disk     | `lsof -nP -iTCP:9100 -sTCP:LISTEN`                                  | `/usr/local/bin/browser-print-agentd`            |
-| launchd label      | `launchctl print gui/$(id -u) \| grep -i print`                     | `io.github.sharaf-nassar.browser-print-agentd`   |
-| Installer receipt  | `pkgutil --pkg-info io.github.sharaf-nassar.browser-print-agentd`   | a receipt with a version and install date        |
+| launchd label      | `launchctl print gui/$(id -u) \| grep -i print`                     | `io.github.isyvertsen.browser-print-agentd`   |
+| Installer receipt  | `pkgutil --pkg-info io.github.isyvertsen.browser-print-agentd`   | a receipt with a version and install date        |
 | Advertised product | `curl -fsS http://127.0.0.1:9100/available`                         | every `Device` has `"provider":"browser-print-agentd"` |
 | Uninstaller        | `ls -l /usr/local/bin/browser-print-agentd-uninstall`               | present                                          |
 
@@ -379,7 +484,7 @@ that happens to be older.
 
    ```bash
    curl -fsS http://127.0.0.1:9100/health
-   pkgutil --pkg-info io.github.sharaf-nassar.browser-print-agentd
+   pkgutil --pkg-info io.github.isyvertsen.browser-print-agentd
    ```
 
    `GET /health` reports the running version, and every response also carries it as
@@ -391,7 +496,7 @@ that happens to be older.
    carries the version, so downgrading is picking a filename:
 
    ```bash
-   gh release download v<previous> --repo sharaf-nassar/browser-print-agentd \
+   gh release download v<previous> --repo isyvertsen/browser-print-agentd \
      --pattern 'browser-print-agentd-*.pkg' --dir ~/Downloads
    ```
 
@@ -497,9 +602,9 @@ Two flags matter (command line only — the package takes no options):
 Confirm the station is clean:
 
 ```bash
-launchctl print gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd  # "Could not find service"
+launchctl print gui/$(id -u)/io.github.isyvertsen.browser-print-agentd  # "Could not find service"
 lsof -nP -iTCP:9100 -sTCP:LISTEN ; lsof -nP -iTCP:9101 -sTCP:LISTEN        # expect no output
-pkgutil --pkg-info io.github.sharaf-nassar.browser-print-agentd            # expect "No receipt"
+pkgutil --pkg-info io.github.isyvertsen.browser-print-agentd            # expect "No receipt"
 security find-certificate -c localhost -a /Library/Keychains/System.keychain  # ours is gone
 ls ~/Library/Logs/browser-print-agentd 2>/dev/null                         # gone unless you kept a copy
 sudo ls /Library/Application\ Support/browser-print-agentd 2>/dev/null     # gone
@@ -534,6 +639,11 @@ curl -fsS http://127.0.0.1:9100/health
 | 200 and healthy, and the caller says "Sent" | The job reached CUPS; the failure is past the agent             | [The job left, no label](#the-job-left-but-no-label) |
 | A label printed, but upside down            | The queue's driver flips the page and was not recognised        | [Upside down](#a-pdf-label-prints-upside-down)       |
 
+**Start with the status page** when a person is at the Mac: <http://127.0.0.1:9100/> says in
+one line whether labels can print and to which queue, lists every queue with the reason it will
+or will not be used, shows the allowed sites with a form to allow or remove one, and the recent
+log. Everything below is the same information for a terminal.
+
 `GET /health` is always the first call. Unlike `/available`, which hides unhealthy printers so a
 caller can never pin one, `/health` lists **every** discovered queue with its verdict, and it
 answers 200 even when CUPS itself is unreachable. The same version rides every response as the
@@ -545,7 +655,7 @@ If the agent answers but you are not sure it is *this* agent, see
 ### Agent not answering
 
 ```bash
-launchctl print gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd | head -30
+launchctl print gui/$(id -u)/io.github.isyvertsen.browser-print-agentd | head -30
 tail -50 ~/Library/Logs/browser-print-agentd/agent.log
 lsof -nP -iTCP:9100 -sTCP:LISTEN
 lsof -nP -iTCP:9101 -sTCP:LISTEN
@@ -578,7 +688,7 @@ domain** is in on-demand-only mode, and the symptom is a station that stays down
 intervenes. Confirm it in two commands:
 
 ```bash
-launchctl print gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd | grep -E 'state|pended'
+launchctl print gui/$(id -u)/io.github.isyvertsen.browser-print-agentd | grep -E 'state|pended'
 launchctl print gui/$(id -u) | grep 'on-demand count'
 ```
 
@@ -593,7 +703,7 @@ it.
 gate and takes effect immediately:
 
 ```bash
-launchctl kickstart gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd
+launchctl kickstart gui/$(id -u)/io.github.isyvertsen.browser-print-agentd
 curl -fsS http://127.0.0.1:9100/health
 ```
 
@@ -776,7 +886,7 @@ Three things make a sheet come out inverted anyway:
   ZPL model and `rastertolabel`. The agent log names this as a render or PPD validation error;
   confirm `/usr/sbin/cupsfilter` and the PPD path exist rather than changing queue defaults.
 - **The verdict is cached for five minutes.** After changing a queue's driver, either wait it out
-  or restart the agent with `launchctl kickstart -k gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd`.
+  or restart the agent with `launchctl kickstart -k gui/$(id -u)/io.github.isyvertsen.browser-print-agentd`.
 
 `POST /write` is unaffected in all cases: ZPL is sent raw and whatever `^PO` command the caller put
 in the label is what the printer obeys.
@@ -814,9 +924,9 @@ depends on it.
 | Which queues does the agent see? | `curl -fsS http://127.0.0.1:9100/health` (shows unhealthy too)                   |
 | What is the caller offered?      | `curl -fsS http://127.0.0.1:9100/available`                                      |
 | Which agent is this?             | `curl -fsS http://127.0.0.1:9100/available` — read `provider`                    |
-| Is the job registered?           | `launchctl print gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd`      |
+| Is the job registered?           | `launchctl print gui/$(id -u)/io.github.isyvertsen.browser-print-agentd`      |
 | Why won't launchd start it?      | `launchctl print gui/$(id -u) \| grep 'on-demand count'`                         |
-| Start it right now               | `launchctl kickstart gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd`  |
+| Start it right now               | `launchctl kickstart gui/$(id -u)/io.github.isyvertsen.browser-print-agentd`  |
 | What did the agent log?          | `~/Library/Logs/browser-print-agentd/agent.log`                                  |
 
 `GET /health` is the one to reach for first: unlike `/available`, which hides unhealthy printers so

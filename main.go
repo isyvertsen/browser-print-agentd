@@ -66,14 +66,17 @@ func run(config config, logger *agentLogger) error {
 		return err
 	}
 
-	handler := newAgent(osRunner{}, logger, config.OriginAllow)
+	handler := newAgent(osRunner{}, logger, config.agentOptions())
 
-	if len(config.OriginAllow) == 0 {
-		logger.write("origin posture: log-and-allow (no --origin-allow configured)")
-	} else {
-		logger.write(fmt.Sprintf("origin posture: /write restricted to %v",
-			config.OriginAllow))
+	posture := handler.origins.posture()
+	logger.write(fmt.Sprintf("origin posture: %s; allowlist %v; origins file %s",
+		posture, handler.origins.effective(), config.OriginsFile))
+	if posture == postureDeny {
+		logger.write(fmt.Sprintf(
+			"no page may print until an origin is added to %s or passed with --origin-allow",
+			config.OriginsFile))
 	}
+	logger.write(fmt.Sprintf("printer match: %s", config.PrinterMatch))
 
 	servers := make([]*http.Server, 0, 2)
 	errs := make(chan error, 2)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -72,23 +73,48 @@ type agent struct {
 	drivers *driverChecker
 	logger  *agentLogger
 
-	// originAllow is the Q14 posture. Empty means log-and-allow: every origin is
-	// recorded and permitted. Non-empty turns /write into an allowlisted
-	// endpoint — a disallowed Origin is rejected before any lp call runs.
-	originAllow []string
+	// origins decides which pages may print. With nothing configured it denies
+	// every print request; `*` restores upstream's log-and-allow on purpose.
+	origins *originPolicy
+
+	// printers decides which CUPS queues are label printers at all. A queue
+	// that fails the match is invisible to every route except /health.
+	printers *printerMatcher
+}
+
+// agentOptions is everything a station configures on the agent beyond its
+// listeners. Zero values are the defaults: deny every origin, and offer only
+// queues that look like Zebra label printers.
+type agentOptions struct {
+	OriginAllow  []string
+	OriginsFile  string
+	PrinterMatch *regexp.Regexp
 }
 
 // newAgent wires an agent over an exec runner (the real one in main, a stub in
-// tests) and an origin allowlist.
-func newAgent(runner execRunner, logger *agentLogger, originAllow []string) *agent {
+// tests) and the station's options.
+func newAgent(runner execRunner, logger *agentLogger, options agentOptions) *agent {
 	cups := newCUPSClient(runner)
-	return &agent{
-		cups:        cups,
-		health:      newHealthChecker(cups),
-		drivers:     newDriverChecker(cups),
-		logger:      logger,
-		originAllow: originAllow,
+	drivers := newDriverChecker(cups)
+	pattern := options.PrinterMatch
+	if pattern == nil {
+		pattern = regexp.MustCompile(defaultPrinterMatch)
 	}
+	return &agent{
+		cups:     cups,
+		health:   newHealthChecker(cups),
+		drivers:  drivers,
+		logger:   logger,
+		origins:  newOriginPolicy(options.OriginAllow, options.OriginsFile),
+		printers: &printerMatcher{pattern: pattern, drivers: drivers},
+	}
+}
+
+// printRoute reports whether a path spools to a printer. The origin posture
+// gates exactly these; read routes stay open so a page can still tell the
+// operator that the agent is there but not yet allowed to print.
+func printRoute(path string) bool {
+	return path == "/write" || path == "/print-pdf"
 }
 
 // ServeHTTP routes the four wire-contract endpoints, the two additive endpoints
@@ -100,12 +126,19 @@ func newAgent(runner execRunner, logger *agentLogger, originAllow []string) *age
 func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	a.logger.request(r.Method, r.URL.Path, origin)
-	setCORSHeaders(w, origin)
 
 	// Set before routing so EVERY response carries it — a 404 and a preflight
 	// included. A station whose agent is answering the wrong thing is diagnosed
 	// from the response it actually produced, which may well be the 404.
 	w.Header().Set(versionHeader, version)
+
+	// The status page is for the person at the Mac, not for web apps: it gets
+	// no CORS headers at all, so no other origin can read or drive it.
+	if uiRoute(r.URL.Path) {
+		a.serveUI(w, r)
+		return
+	}
+	setCORSHeaders(w, origin)
 
 	if r.Method == http.MethodOptions {
 		// Private Network Access. Chromium treats a public https page reaching
@@ -118,11 +151,12 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// hard-blocks printing on a station whose agent is running fine. The
 		// log is the tell: paired OPTIONS with no GET behind them.
 		//
-		// Gated on originAllowed so the Q14 posture governs this grant too — an
-		// origin the station would refuse at /write must not be handed a
-		// blanket private-network grant here.
+		// The grant is gated on the origin posture only for the print routes: a
+		// page the station will not let print still gets to read /available,
+		// which is how it learns the agent is present and what to tell the
+		// operator to configure.
 		if r.Header.Get("Access-Control-Request-Private-Network") == "true" &&
-			a.originAllowed(origin) {
+			(!printRoute(r.URL.Path) || a.origins.allowed(origin)) {
 			w.Header().Set("Access-Control-Allow-Private-Network", "true")
 		}
 		w.Header().Set("Content-Length", "0")
@@ -346,39 +380,32 @@ func (a *agent) handlePrintPDF(w http.ResponseWriter, r *http.Request, origin st
 // /print-pdf go through it so a route that spools to a printer cannot acquire a
 // second, weaker copy of the allowlist check.
 func (a *agent) enforceOrigin(w http.ResponseWriter, action string, origin string) bool {
-	if a.originAllowed(origin) {
+	if a.origins.allowed(origin) {
 		return true
 	}
 	a.logger.originRejected(action, origin)
+	hint := "it is not on this station's allowlist"
+	if a.origins.posture() == postureDeny {
+		hint = "no origin is allowed to print on this station yet"
+	}
+	where := "pass --origin-allow"
+	if a.origins.file != "" {
+		where = fmt.Sprintf("add it to %s (one origin per line) or pass --origin-allow",
+			a.origins.file)
+	}
 	sendText(w, http.StatusForbidden, fmt.Sprintf(
-		"origin %q is not allowed to print on this station\n", origin))
-	return false
-}
-
-// originAllowed applies the Q14 posture: unconfigured means every origin is
-// allowed (and logged); configured means only listed origins may print.
-// A request with no Origin header is not on any allowlist, so it is rejected
-// once one is configured.
-func (a *agent) originAllowed(origin string) bool {
-	if len(a.originAllow) == 0 {
-		return true
-	}
-	for _, allowed := range a.originAllow {
-		if origin == allowed {
-			return true
-		}
-	}
+		"origin %q may not print: %s; %s\n", origin, hint, where))
 	return false
 }
 
 // usablePrinters discovers the station's queues and filters them to the ones
-// that can print, keeping USB-first order.
+// that are label printers and can print, keeping USB-first order.
 func (a *agent) usablePrinters(ctx context.Context) ([]printer, error) {
 	printers, err := discoverPrinters(ctx, a.cups)
 	if err != nil {
 		return nil, fmt.Errorf("could not enumerate CUPS printers: %w", err)
 	}
-	return a.health.healthyPrinters(ctx, printers), nil
+	return a.health.healthyPrinters(ctx, a.printers.filter(ctx, printers)), nil
 }
 
 // resolveTarget picks the printer a job goes to, performing device-level
@@ -393,11 +420,10 @@ func (a *agent) usablePrinters(ctx context.Context) ([]printer, error) {
 func (a *agent) resolveTarget(
 	ctx context.Context, action string, requested string,
 ) (printer, error) {
-	printers, err := discoverPrinters(ctx, a.cups)
+	usable, err := a.usablePrinters(ctx)
 	if err != nil {
-		return printer{}, fmt.Errorf("could not enumerate CUPS printers: %w", err)
+		return printer{}, err
 	}
-	usable := a.health.healthyPrinters(ctx, printers)
 
 	if requested != "" {
 		if target, found := matchPrinter(usable, requested); found {

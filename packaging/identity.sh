@@ -20,14 +20,14 @@
 
 # The product name. Everything below is derived from it except BUNDLE_PREFIX,
 # which is the reverse-DNS namespace the maintainer actually controls
-# (sharaf-nassar.github.io), and PRODUCT_TITLE, which is prose.
+# (isyvertsen.github.io), and PRODUCT_TITLE, which is prose.
 PRODUCT_NAME="browser-print-agentd"
 PRODUCT_TITLE="Browser Print Agent"
 
 # launchd Label and productbuild package identifier — deliberately the same
 # string, as they have always been. Free-form reverse-DNS: the hyphen in the
 # account name is legal in both, because neither is resolved as a DNS name.
-BUNDLE_PREFIX="io.github.sharaf-nassar"
+BUNDLE_PREFIX="io.github.isyvertsen"
 BUNDLE_ID="${BUNDLE_PREFIX}.${PRODUCT_NAME}"
 
 # Installed payload.
@@ -40,6 +40,34 @@ LAUNCHER_PATH="${LIBEXEC_DIR}/launcher"
 PLIST_NAME="${BUNDLE_ID}.plist"
 AGENT_PLIST_PATH="/Library/LaunchAgents/${PLIST_NAME}"
 
+# The optional updater: a short-lived root LaunchDaemon that installs the
+# release a SIGNED manifest names. It is shipped only when packaging/
+# allowed_signers holds at least one key line; otherwise none of these paths
+# exist on a station and postinstall/uninstall find nothing to register.
+UPDATER_NAME="updater"
+UPDATER_PATH="${LIBEXEC_DIR}/${UPDATER_NAME}"
+UPDATER_LABEL="${BUNDLE_ID}.updater"
+UPDATER_PLIST_NAME="${UPDATER_LABEL}.plist"
+UPDATER_PLIST_PATH="/Library/LaunchDaemons/${UPDATER_PLIST_NAME}"
+ALLOWED_SIGNERS_PATH="${LIBEXEC_DIR}/allowed_signers"
+# ssh-keygen -Y identity and namespace the manifest is signed under. Both are
+# part of what a signature commits to, so a signature made for another product
+# or purpose does not verify here even with the same key.
+SIGNER_IDENTITY="release"
+SIGN_NAMESPACE="${PRODUCT_NAME}-release"
+
+# Where the updater looks. The default is this repository's GitHub Releases;
+# a private build overrides it at build time with UPDATE_BASE_URL. The layout
+# under it is GitHub's: latest/download/<asset> and download/v<X.Y.Z>/<asset>.
+UPDATE_BASE_URL="${UPDATE_BASE_URL:-https://github.com/${BUNDLE_PREFIX#io.github.}/${PRODUCT_NAME}/releases}"
+
+# Root-owned updater state and logging, separate from the agent's per-account
+# support and log directories below.
+SYSTEM_SUPPORT_DIR="/Library/Application Support/${PRODUCT_NAME}"
+UPDATE_STATE_DIR="${SYSTEM_SUPPORT_DIR}/updater"
+UPDATE_STATUS_PATH="${SYSTEM_SUPPORT_DIR}/update-status"
+SYSTEM_LOG_DIR="/Library/Logs/${PRODUCT_NAME}"
+
 # Per-account directories, relative to a home directory. Names only: the home
 # they hang off is resolved at install time against the station account, never
 # against root.
@@ -51,6 +79,13 @@ LOG_FILE_NAME="agent.log"
 ENV_PREFIX="BROWSER_PRINT_AGENTD"
 TARGET_USER_ENV="${ENV_PREFIX}_TARGET_USER"
 LOG_PATH_ENV="${ENV_PREFIX}_LOG_PATH"
+# Doubles as the agent's own flag mirror and as the installer's seed for the
+# per-account allowlist file, so one variable configures both paths.
+ORIGIN_ALLOW_ENV="${ENV_PREFIX}_ORIGIN_ALLOW"
+
+# The per-account origin allowlist, next to the cert pair. Mirrors
+# `originsFileName` in origins.go.
+ORIGINS_FILE_NAME="allowed-origins.txt"
 
 # mktemp/log identity. TEMP_PREFIX is intentionally shorter than PRODUCT_NAME:
 # it is the shared prefix for every temp file the product creates, including the

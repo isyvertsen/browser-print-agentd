@@ -23,20 +23,15 @@ var version = "dev"
 // only the status and the body — so this cannot perturb the wire contract.
 const versionHeader = "X-Print-Agent-Version"
 
-// Origin postures reported by the diagnostics endpoint, matching the Q14
-// decision: unconfigured means every origin is logged and allowed, configured
-// means /write is allowlisted.
-const (
-	posturelogAndAllow = "log-and-allow"
-	postureAllowlist   = "allowlist"
-)
-
 // healthReport is the `GET /health` body: what version is running, what origin
-// posture it is enforcing, and what CUPS looks like from where the agent sits.
+// posture it is enforcing, which queues it will drive, and what CUPS looks
+// like from where the agent sits.
 type healthReport struct {
 	Version       string          `json:"version"`
 	OriginPosture string          `json:"originPosture"`
 	OriginAllow   []string        `json:"originAllow"`
+	OriginsFile   string          `json:"originsFile,omitempty"`
+	PrinterMatch  string          `json:"printerMatch"`
 	Printers      []healthPrinter `json:"printers"`
 
 	// CUPSError is set when discovery itself failed. The report is still a 200
@@ -54,7 +49,12 @@ type healthPrinter struct {
 	Queue      string `json:"queue"`
 	DeviceURI  string `json:"deviceUri"`
 	Connection string `json:"connection"`
-	Healthy    bool   `json:"healthy"`
+
+	// Eligible says the queue passed --printer-match; Healthy says CUPS can
+	// print to it. /available lists a queue only when both are true, so this
+	// is where "why is my printer not showing up" gets its answer.
+	Eligible bool `json:"eligible"`
+	Healthy  bool `json:"healthy"`
 }
 
 // handleHealth answers the additive diagnostics endpoint.
@@ -69,12 +69,11 @@ func (a *agent) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	report := healthReport{
 		Version:       version,
-		OriginPosture: posturelogAndAllow,
-		OriginAllow:   append([]string{}, a.originAllow...),
+		OriginPosture: a.origins.posture(),
+		OriginAllow:   a.origins.effective(),
+		OriginsFile:   a.origins.file,
+		PrinterMatch:  a.printers.pattern.String(),
 		Printers:      []healthPrinter{},
-	}
-	if len(a.originAllow) > 0 {
-		report.OriginPosture = postureAllowlist
 	}
 
 	printers, err := discoverPrinters(ctx, a.cups)
@@ -86,7 +85,7 @@ func (a *agent) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	// Reuses the concurrent probe `/available` runs rather than adding a second
 	// health path, then inverts it: everything discovered is reported, flagged
-	// by whether it survived the filter.
+	// by whether it survived each filter.
 	usable := a.health.healthyPrinters(ctx, printers)
 	healthy := make(map[string]bool, len(usable))
 	for _, candidate := range usable {
@@ -99,6 +98,7 @@ func (a *agent) handleHealth(w http.ResponseWriter, r *http.Request) {
 			Queue:      candidate.Queue,
 			DeviceURI:  candidate.DeviceURI,
 			Connection: candidate.Connection,
+			Eligible:   a.printers.eligible(ctx, candidate),
 			Healthy:    healthy[candidate.Queue],
 		})
 	}

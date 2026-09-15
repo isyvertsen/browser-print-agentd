@@ -20,8 +20,10 @@
 # there instead of drifting silently against a workflow literal that still
 # predicts the old asset name.
 #
-# Every release attaches THREE assets: the versioned installer, a byte-identical
-# copy of it under a version-free name, and the installer's `.sha256`. The
+# Every release attaches the versioned installer, a byte-identical copy of it
+# under a version-free name, the installer's `.sha256`, and — when the
+# RELEASE_SIGNING_KEY secret is provisioned — the `update-manifest.txt` the
+# shipped updater polls plus its detached `ssh-keygen -Y` signature. The
 # version-free copy is the evergreen download
 # contract described at "Copy the notarized package to the stable download
 # name" below — it is unconditional, and no release may ship without it.
@@ -198,10 +200,37 @@ jobs:
           # enabling the cache would demand a `go.sum` that never exists.
           cache: false
 
+      # Two independent signing capabilities, each optional. Apple Developer ID
+      # signing plus notarization is what lets a downloaded installer open
+      # without a Gatekeeper prompt; the release signing key is what lets the
+      # shipped updater trust a manifest. `secrets` is not readable from a
+      # step's `if:`, so presence is exported to env here and gated on below.
+      - name: Detect signing capabilities
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "HAS_APPLE=true" >> "$GITHUB_ENV"
+            echo "apple signing: available"
+          else
+            echo "HAS_APPLE=false" >> "$GITHUB_ENV"
+            echo "::warning::APPLE_CERTIFICATE not provisioned; the .pkg will be UNSIGNED and Gatekeeper will prompt on download"
+          fi
+          if [ -n "$RELEASE_SIGNING_KEY" ]; then
+            echo "HAS_RELEASE_KEY=true" >> "$GITHUB_ENV"
+            echo "manifest signing: available"
+          else
+            echo "HAS_RELEASE_KEY=false" >> "$GITHUB_ENV"
+            echo "::warning::RELEASE_SIGNING_KEY not provisioned; no update manifest will be published"
+          fi
+
       # One import covers both identities: the provisioned p12 holds the
       # Developer ID Application cert (for the Mach-O) and the Developer ID
       # Installer cert (for the .pkg).
       - name: Import the Developer ID identities
+        if: env.HAS_APPLE == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -274,19 +303,31 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/release"
+          identity_args=()
+          if [ "$HAS_APPLE" = "true" ]; then
+            identity_args=(--app-identity "$APP_ID" --installer-identity "$INST_ID")
+          fi
           GO_LDFLAGS="-X main.version=$VERSION" \
             ./build-pkg.sh \
               --version "$VERSION" \
               --arch arm64 \
               --output "$RUNNER_TEMP/release" \
-              --app-identity "$APP_ID" \
-              --installer-identity "$INST_ID"
+              ${identity_args[@]+"${identity_args[@]}"}
+          if [ "$HAS_APPLE" != "true" ]; then
+            # build-pkg.sh names an unsigned package -unsigned.pkg so it cannot
+            # be mistaken for a notarized one locally. As a published asset it
+            # takes the versioned name the updater's manifest points at; the
+            # release notes say it is unsigned.
+            mv "$RUNNER_TEMP/release/$BINARY_NAME-$VERSION-unsigned.pkg" "$PKG_PATH"
+          fi
           if [ ! -f "$PKG_PATH" ]; then
             echo "::error::build-pkg.sh did not produce $PKG_PATH"
             ls -l "$RUNNER_TEMP/release"
             exit 1
           fi
-          pkgutil --check-signature "$PKG_PATH"
+          if [ "$HAS_APPLE" = "true" ]; then
+            pkgutil --check-signature "$PKG_PATH"
+          fi
 
       # The version half of the release contract. It runs the binary EXTRACTED
       # FROM THE BUILT PACKAGE, not a second build of the same source: a version
@@ -311,9 +352,11 @@ jobs:
           file "$BIN"
           # The payload is signed inside the package; assert that here rather
           # than trusting that build-pkg.sh was handed an identity.
-          codesign --verify --strict --verbose=2 "$BIN"
-          codesign --display --verbose=4 "$BIN" 2>&1 \
-            | grep -E "flags|Identifier|TeamIdentifier|Timestamp" || true
+          if [ "$HAS_APPLE" = "true" ]; then
+            codesign --verify --strict --verbose=2 "$BIN"
+            codesign --display --verbose=4 "$BIN" 2>&1 \
+              | grep -E "flags|Identifier|TeamIdentifier|Timestamp" || true
+          fi
 
           "$BIN" --port 19100 --https-port 19101 > agent.out 2>&1 &
           AGENT_PID=$!
@@ -350,6 +393,7 @@ jobs:
       # submission type, so a green submission for a zipped binary would prove
       # nothing about what actually ships.
       - name: Notarize the .pkg
+        if: env.HAS_APPLE == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -388,6 +432,7 @@ jobs:
       # Stapling is what lets a station install with no network path to Apple,
       # so the ticket is validated rather than assumed.
       - name: Staple the notarization ticket
+        if: env.HAS_APPLE == 'true'
         run: |
           set -euo pipefail
           xcrun stapler staple -v "$PKG_PATH"
@@ -399,6 +444,7 @@ jobs:
       # verdict, because a verdict obtained after `xattr -d` says nothing about
       # the operator's Mac.
       - name: Assess Gatekeeper with the quarantine bit set
+        if: env.HAS_APPLE == 'true'
         run: |
           set -euo pipefail
           xattr -w com.apple.quarantine \
@@ -470,6 +516,45 @@ jobs:
           fi
           echo "checksum asset: $CHECKSUM_ASSET"
 
+      # The update feed. The manifest names one version, its asset and its
+      # SHA-256; the detached signature is what a station's updater verifies
+      # with `ssh-keygen -Y verify` against the allowed_signers file baked into
+      # its package. The private key exists only as a GitHub secret and only
+      # for the duration of this step.
+      - name: Sign the update manifest
+        if: env.HAS_RELEASE_KEY == 'true'
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          MANIFEST_PATH="$RUNNER_TEMP/release/update-manifest.txt"
+          PKG_ASSET=$(basename "$PKG_PATH")
+          PKG_SHA256=$(awk '{print $1}' "$CHECKSUM_PATH")
+          printf 'version=%s\nasset=%s\nsha256=%s\n' \
+            "$VERSION" "$PKG_ASSET" "$PKG_SHA256" > "$MANIFEST_PATH"
+
+          KEY="$RUNNER_TEMP/release-signing-key"
+          umask 077
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$KEY"
+          NAMESPACE=$(sh -c '. ./packaging/identity.sh; printf "%s" "$SIGN_NAMESPACE"')
+          IDENTITY=$(sh -c '. ./packaging/identity.sh; printf "%s" "$SIGNER_IDENTITY"')
+          ssh-keygen -Y sign -f "$KEY" -n "$NAMESPACE" "$MANIFEST_PATH"
+          rm -f "$KEY"
+
+          # Verify with exactly the file the package ships, so a key that was
+          # rotated in the secret but not in allowed_signers fails HERE rather
+          # than on every station an hour after release.
+          SIGNERS="$RUNNER_TEMP/allowed_signers"
+          grep -vE '^[[:space:]]*(#|$)' packaging/allowed_signers > "$SIGNERS"
+          if ! ssh-keygen -Y verify -f "$SIGNERS" -I "$IDENTITY" -n "$NAMESPACE" \
+               -s "$MANIFEST_PATH.sig" < "$MANIFEST_PATH"; then
+            echo "::error::the manifest signature does not verify against packaging/allowed_signers"
+            exit 1
+          fi
+          echo "MANIFEST_PATH=$MANIFEST_PATH" >> "$GITHUB_ENV"
+          echo "✅ update-manifest.txt signed and verified against packaging/allowed_signers" \
+            >> "$GITHUB_STEP_SUMMARY"
+
       # The evergreen download contract — a PUBLIC, CROSS-PROJECT PROMISE, not
       # an implementation detail of this workflow.
       #
@@ -536,10 +621,15 @@ jobs:
         run: |
           set -euo pipefail
           if ! gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            if [ "$HAS_APPLE" = "true" ]; then
+              NOTES="Notarized macOS installer for browser-print-agentd."
+            else
+              NOTES="macOS installer for browser-print-agentd. This build is NOT Apple-signed: macOS will refuse to open it by double-click. Install it with: sudo installer -pkg browser-print-agentd-$VERSION.pkg -target /"
+            fi
             gh release create "$TAG_NAME" --verify-tag \
               --latest=false \
               --title "$TAG_NAME" \
-              --notes "Notarized macOS installer for browser-print-agentd. Install the .pkg on the station Mac; the agent reports $VERSION on GET /health and the X-Print-Agent-Version header. To roll a station back to an earlier build, install that release's .pkg over this one — see README.md."
+              --notes "$NOTES The agent reports $VERSION on GET /health and the X-Print-Agent-Version header. To roll a station back to an earlier build, install that release's .pkg over this one — see README.md."
           fi
           # --clobber so a re-run of the same tag replaces its own assets rather
           # than failing. Assets are scoped to their own release, so uploading
@@ -550,9 +640,11 @@ jobs:
           # overwritten. Nothing in this workflow deletes: there is no
           # `gh release delete` and no `gh release delete-asset` anywhere in it,
           # by design.
-          gh release upload "$TAG_NAME" \
-            "$PKG_PATH" "$STABLE_PKG_PATH" "$CHECKSUM_PATH" \
-            --clobber
+          assets=("$PKG_PATH" "$STABLE_PKG_PATH" "$CHECKSUM_PATH")
+          if [ -n "${MANIFEST_PATH:-}" ]; then
+            assets+=("$MANIFEST_PATH" "$MANIFEST_PATH.sig")
+          fi
+          gh release upload "$TAG_NAME" "${assets[@]}" --clobber
           # Mark latest only after every asset is attached. This is explicit
           # rather than GitHub's date/version-based latest selection, and it is
           # what repoints `latest/download/<product>.pkg` for the evergreen

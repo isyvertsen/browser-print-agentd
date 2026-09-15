@@ -34,6 +34,11 @@ BINARY="__BINARY_PATH__"
 UNINSTALLER="__UNINSTALLER_PATH__"
 LIBEXEC_DIR="__LIBEXEC_DIR__"
 AGENT_PLIST="/Library/LaunchAgents/${LABEL}.plist"
+UPDATER="__UPDATER_PATH__"
+UPDATER_LABEL="__UPDATER_LABEL__"
+UPDATER_PLIST="__UPDATER_PLIST_PATH__"
+SYSTEM_SUPPORT_DIR="__SYSTEM_SUPPORT_DIR__"
+SYSTEM_LOG_DIR="__SYSTEM_LOG_DIR__"
 UNINSTALL_APP="__UNINSTALL_APP_PATH__"
 SYSTEM_KEYCHAIN="/Library/Keychains/System.keychain"
 PORTS=(9100 9101)
@@ -115,8 +120,19 @@ if [ -n "$TARGET_USER" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 1. Stop and unregister the launchd job
+# 1. Stop and unregister the launchd jobs
 # ---------------------------------------------------------------------------
+
+# The updater exists only on a station whose package shipped one; every call
+# is best-effort so a package without it uninstalls identically.
+/bin/launchctl bootout "system/$UPDATER_LABEL" >/dev/null 2>&1 || true
+# Clear a persisted administrator pin as part of a full uninstall. Normal
+# package upgrades never execute this path, so their pin remains intact.
+/bin/launchctl enable "system/$UPDATER_LABEL" >/dev/null 2>&1 || true
+if [ -f "$UPDATER_PLIST" ]; then
+	log "removing $UPDATER_PLIST"
+	/bin/rm -f "$UPDATER_PLIST"
+fi
 
 if [ -n "$TARGET_UID" ]; then
 	log "stopping $LABEL in gui/$TARGET_UID"
@@ -144,8 +160,10 @@ fi
 # leaving a station with its launchd jobs torn down and every file still on
 # disk. Requiring whitespace-or-end after the path lets the agent's own command
 # line match while "$BINARY-uninstall" cannot, because the next character there
-# is a hyphen.
+# is a hyphen. Anchoring with ^ instead would be wrong: the updater is a shell
+# script, so its command line begins with the interpreter, not the path.
 /usr/bin/pkill -f "$BINARY([[:space:]]|\$)" >/dev/null 2>&1 || true
+/usr/bin/pkill -f "$UPDATER([[:space:]]|\$)" >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
 # 2. Untrust and delete the station cert
@@ -195,7 +213,8 @@ fi
 # was started by double-clicking that app, this deletes the bundle out from
 # under the running script — which is safe on macOS, where an executing file
 # unlinks cleanly and keeps running from its open inode.
-for path in "$BINARY" "$LIBEXEC_DIR" "$UNINSTALL_APP"; do
+for path in "$BINARY" "$LIBEXEC_DIR" "$SYSTEM_SUPPORT_DIR" "$SYSTEM_LOG_DIR" \
+	"$UNINSTALL_APP"; do
 	if [ -e "$path" ]; then
 		log "removing $path"
 		/bin/rm -rf "$path"

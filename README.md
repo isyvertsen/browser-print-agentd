@@ -16,6 +16,30 @@ endorsed, sponsored, certified, or supported by Zebra Technologies Corporation. 
 "Browser Print", and "ZPL" are trademarks of their respective owners and appear here only to
 name the wire contract this agent emulates.
 
+**This is a fork.** The original is
+[sharaf-nassar/browser-print-agentd](https://github.com/sharaf-nassar/browser-print-agentd) by
+Sharaf Nassar, MIT licensed, and the wire contract, CUPS spooling, health-gated failover and
+origin posture are all upstream's work. This fork, maintained by Ivar Syvertsen, differs in four
+deliberate ways:
+
+- **Updates are opt-in and signed by you.** Upstream's package always shipped a root
+  LaunchDaemon that installed whatever GitHub's latest release said, trusting Apple's notarization
+  of the maintainer's build. Here the updater ships only when the package is built with a signing
+  key you own, polls a feed URL you choose, and installs only what a manifest signed with that key
+  names. A checkout with no key builds a package that never phones home.
+- **The installer never removes other software.** Upstream's `preinstall` deleted Zebra Browser
+  Print by path glob, as root. Here it refuses to install while another agent holds ports
+  9100/9101 and tells you to quit or uninstall that program yourself.
+- **No page may print until you allow it.** Upstream allowed every origin by default and only
+  logged. Here the default is deny, and the allowlist is a plain file in your own Application
+  Support directory that the agent re-reads when it changes.
+- **Only label printers are offered.** Upstream listed every CUPS queue as a Zebra printer, office
+  laser included, and would spool raw ZPL to it. Here a queue has to match `--printer-match`
+  (Zebra by default) on its name, device URI or driver.
+
+The bundle id, launchd label and package identifier are `io.github.isyvertsen.…`, so this fork
+and upstream never overwrite each other's install receipts.
+
 **Running this on a station?** [`RUNBOOK.md`](./RUNBOOK.md) is the admin-facing guide: install,
 migrate from another localhost print agent, roll back, uninstall, diagnose a station that will not
 print, and validate one on real hardware.
@@ -24,7 +48,7 @@ print, and validate one on real hardware.
 
 You need a Mac with Apple Silicon and your Mac's administrator password.
 
-**[Download the installer](https://github.com/sharaf-nassar/browser-print-agentd/releases/latest/download/browser-print-agentd.pkg)**
+**[Download the installer](https://github.com/isyvertsen/browser-print-agentd/releases/latest/download/browser-print-agentd.pkg)**
 
 Open the downloaded file, follow the prompts, and enter your Mac password when it asks. When it
 finishes, label printing works. There is no application to launch and no next step.
@@ -45,9 +69,28 @@ so macOS will open it without warnings.
 
 ## Updates
 
-The agent does not update itself and never makes a network request. To upgrade, download and
-run a newer installer over the existing one; to downgrade, run an older one. Either way it is a
-normal install and nothing has to be removed first.
+The agent itself never makes a network request. Whether the *package* keeps itself current is a
+build-time choice:
+
+- **Built without a signing key** (the default for a checkout), the package carries no updater.
+  To upgrade, run a newer installer over the existing one; to downgrade, run an older one. Either
+  way it is a normal install and nothing has to be removed first.
+- **Built with a key in `packaging/allowed_signers`**, the package also installs a short-lived root
+  LaunchDaemon that checks a release feed hourly and installs whatever a **signed** manifest names.
+  The feed URL is baked in at build time (`UPDATE_BASE_URL`; default: this repository's GitHub
+  Releases) and can be any HTTPS file server you control — behind Cloudflare Tunnel, for example.
+  Trust never comes from the server: the manifest is verified with `ssh-keygen -Y verify` against
+  the public key shipped in the package, and the package's SHA-256 is read from that signed
+  manifest. If the installed binary is Apple-signed, the downloaded package must also be signed by
+  the same Team ID and notarized. Pin a station with
+  `sudo launchctl disable system/io.github.isyvertsen.browser-print-agentd.updater`.
+
+To set the feed up: generate a key with
+`ssh-keygen -t ed25519 -N '' -C browser-print-agentd-release -f release-signing-key`, paste the
+public key into `packaging/allowed_signers` as `release ssh-ed25519 AAAA…`, store the private key
+as the `RELEASE_SIGNING_KEY` Actions secret, and tag a release. The workflow signs
+`update-manifest.txt`, verifies it against `allowed_signers` before publishing, and attaches
+both. See `RUNBOOK.md` for the feed layout and how to point stations at your own server.
 
 ## Uninstall
 
@@ -92,7 +135,7 @@ Installed layout:
 | `/usr/local/bin/browser-print-agentd-uninstall`                            | the uninstaller                    |
 | `/Applications/Uninstall Browser Print Agent.app`                          | GUI front end for the uninstaller  |
 | `/usr/local/libexec/browser-print-agentd/launcher`                         | agent launchd entry point          |
-| `/Library/LaunchAgents/io.github.sharaf-nassar.browser-print-agentd.plist` | per-user LaunchAgent               |
+| `/Library/LaunchAgents/io.github.isyvertsen.browser-print-agentd.plist` | per-user LaunchAgent               |
 | `~/Library/Application Support/browser-print-agentd/`                      | `cert.pem` and `key.pem`           |
 | `~/Library/Logs/browser-print-agentd/`                                     | private, bounded per-user log ring |
 
@@ -100,11 +143,30 @@ Nothing runs as root after the installer exits, and nothing on the machine has n
 
 ## Configuration
 
-**Configuration** is by flag, with an environment mirror for each:
-`--bind`, `--port`, `--https-port`, `--cert-dir`, `--origin-allow`, mirrored by
-`BROWSER_PRINT_AGENTD_BIND`, `_PORT`, `_HTTPS_PORT`, `_CERT_DIR`, and `_ORIGIN_ALLOW`. A flag
-always wins over its environment mirror, which always wins over the built-in default. Printer
-selection is deliberately **not** configurable — queues come from CUPS.
+**Which pages may print** is the one thing you have to configure. Nothing may print until an
+origin is allowed. Add your web app's origin — scheme and host, no path — to
+`~/Library/Application Support/browser-print-agentd/allowed-origins.txt`, one per line:
+
+```text
+https://labels.example.com
+```
+
+The running agent picks the change up within a couple of seconds; no restart, no admin
+password. A lone `*` allows every origin, which is what upstream did by default and is not
+recommended. The same list can be passed as `--origin-allow https://a,https://b` in the
+LaunchAgent plist, or seeded at install time by setting `BROWSER_PRINT_AGENTD_ORIGIN_ALLOW` in
+the installer's environment. Read routes (`/available`, `/default`, `/health`) always answer, so a
+page can tell you the agent is present but not yet allowed.
+
+**Which queues are label printers** is decided by `--printer-match`, a regular expression tested
+against each CUPS queue's name, device URI and driver identity. The default matches Zebra by
+brand, language (`ZPL`), driver family (`ZDesigner`) and model prefix (`ZD621`, `ZT411`, …), so
+the office laser never appears on `/available` and never receives raw ZPL. Pass `--printer-match .`
+to offer every queue; `GET /health` shows each queue's `eligible` verdict.
+
+Everything else: `--bind`, `--port`, `--https-port`, `--cert-dir`, `--origins-file`, each with an
+environment mirror (`BROWSER_PRINT_AGENTD_BIND` and so on). A flag always wins over its
+environment mirror, which always wins over the built-in default.
 
 The agent does not create CUPS queues for you. Add the printer once with `lpadmin`
 (`-m drv:///sample.drv/zebra.ppd`; `lpadmin -m raw` no longer exists on macOS).
@@ -129,7 +191,13 @@ no Apple hardware.
 ```bash
 packaging/build-pkg.sh --stage-only          # layout check, no macOS needed
 packaging/build-pkg.sh --version 0.1.0       # full build (macOS)
+packaging/dev-run.sh                         # run it on this Mac, as you, no installer
 ```
+
+`dev-run.sh` builds the binary and registers it as a per-user LaunchAgent under a `.dev` label
+with no administrator password: no certificate, no `:9101`, no updater, but the same ports and
+the same allowlist file, so a web app in Chrome can print through it right away. `--status` and
+`--remove` do what they say.
 
 Its environment interface, equivalent to the flags:
 
@@ -179,6 +247,7 @@ them answers those paths with the plain-text `404` its default arm has always pr
 | `POST` | `/write`      | spools `{"data": "<raw ZPL>"}` to the requested (or resolved) printer; empty `200` on success, plain-text body on failure |
 | `POST` | `/read`       | empty `200` — dead surface for most callers, kept so the agent stays a drop-in                                            |
 | `GET`  | `/health`     | **additive** diagnostics: running version, origin posture, and every queue's health                                      |
+| `GET`  | `/`           | **additive**: the status page for the person at the Mac — which printer labels go to, which sites may print, recent activity, and a form to allow or remove a site. No CORS, strict CSP, same-origin form only |
 | `POST` | `/print-pdf`  | **additive**: spools `{"data": "<base64 PDF>"}` as a rendered document; same `200`/plain-text convention as `/write`      |
 
 `OPTIONS` on any path answers the CORS preflight with `204`.
@@ -204,9 +273,22 @@ bridge between the local browser and local CUPS, never a network service.
 is reported: the `Device` shape must never grow a version field, because callers parse and pin
 it. A binary built any way other than a tagged release reports `dev`.
 
-**Origin posture.** With no `--origin-allow` configured the agent is `log-and-allow`: every
-origin is recorded and permitted. Configure an allowlist and both print routes — `/write` and
-`/print-pdf` — reject any other origin with `403` *before* any CUPS work happens.
+**Origin posture.** Deny until configured. Both print routes — `/write` and `/print-pdf` —
+reject any origin not on the allowlist with a `403` that names the file to edit, *before* any
+CUPS work happens. The allowlist is the union of `--origin-allow` and the per-user
+`allowed-origins.txt`; `*` allows all. The Chromium private-network preflight grant follows the
+same split: always granted for reads, granted for print routes only to an allowed origin.
+
+**Printer eligibility.** Only queues matching `--printer-match` are discovered, health-checked,
+offered, or used as a failover target. An ineligible queue appears on `/health` with
+`"eligible": false` and nowhere else.
+
+**Status page.** Open <http://127.0.0.1:9100/> on the Mac itself. It answers "can this Mac
+print?" in one line, lists every queue with the reason it will or will not be used, lists the
+allowed sites with a form to allow or remove one (writing the same `allowed-origins.txt` the
+agent reads), and shows recent activity. It sends no CORS headers, carries a
+`default-src 'none'` CSP, and accepts its form only from itself (`Sec-Fetch-Site` and `Origin`
+both checked), so a web page on another origin can neither read it nor change the allowlist.
 
 ## License
 

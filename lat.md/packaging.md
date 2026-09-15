@@ -53,7 +53,8 @@ Every shipped packaging artifact is a `.in` template that `packaging/build-pkg.s
 from the repository.
 
 The template set is `launchagent.plist.in`, `distribution.xml.in`,
-`launcher.sh.in`, `uninstall.sh.in`, `scripts/preinstall.in`,
+`launcher.sh.in`, `uninstall.sh.in`, `scripts/preinstall.in`, and — only when
+`packaging/allowed_signers` carries a key — `updater.sh.in` and `updater.plist.in`, plus
 `scripts/postinstall.in`, `component.plist.in`, and the two that make up the uninstaller app
 ([[packaging#Packaging#Station Installer#Uninstaller#The Uninstaller App]]):
 `uninstall-app-info.plist.in` and `uninstall-app.sh.in`. Rendering fills the launchd label and
@@ -92,8 +93,8 @@ the installer's cert generation uses `browser-print-openssl`, so temp files shar
 ## Station Installer
 
 What the `.pkg` actually does to a station. It is a `.pkg` and not a drag-install `.dmg` because
-everything install must do — remove the vendor's own Browser Print, trust a cert, register a
-launchd job — is a root action.
+everything install must do — trust a cert, register a launchd job, prove the ports are free —
+is a root action.
 
 ### LaunchAgent, Not LaunchDaemon
 
@@ -113,8 +114,9 @@ than straight at the binary, because launchd does not expand a home directory in
 `StandardOutPath`/`StandardErrorPath`. The launcher resolves `$HOME`, exports the identity-derived
 log path, and sends otherwise-unused stdout/stderr to `/dev/null`; the daemon opens the path and
 owns all normal output. Failures before the daemon logger exists go to unified logging through
-`logger`. The plist is also the per-station configuration surface — ports, bind address, and the
-optional origin allowlist are edited there and nowhere else, and no origin ships in the package.
+`logger`. The plist is the root-owned configuration surface — ports, bind address, the printer
+match and a static origin allowlist — while the per-account `allowed-origins.txt` next to the
+cert pair is the one an operator edits without root; no origin ships in the package.
 
 ### Request Log Ownership And Rotation
 
@@ -180,6 +182,19 @@ automatically in ~3 s — inside `ThrottleInterval=10`, with no plist edit invol
 documented transient condition tied to a staged OS update, not a packaging defect, and keeping
 stations current on macOS is therefore an availability requirement. The plist comment carries the
 diagnosis so the next reader does not go hunting for a `KeepAlive` variant that does not exist.
+
+### Optional Updater
+
+The updater LaunchDaemon and its script are staged only when `packaging/allowed_signers` holds a
+key line; a package built without one carries no updater and its scripts find nothing to register.
+
+`build-pkg.sh` counts key lines in `allowed_signers` and, for a positive count, renders
+`updater.sh.in` and `updater.plist.in`, copies the comment-stripped signers file to
+`${ALLOWED_SIGNERS_PATH}`, and creates `/Library/LaunchDaemons` in the payload. `postinstall`
+registers the daemon only if its plist is present, and `uninstall` boots it out best-effort so a
+package without it uninstalls identically. `UPDATE_BASE_URL` is rendered into the script at build
+time and defaults, in `identity.sh`, to this repository's GitHub Releases. The design is in
+[[operations#Station Operations#Signed Updates From A Feed You Choose]].
 
 ### Preinstall And Postinstall
 

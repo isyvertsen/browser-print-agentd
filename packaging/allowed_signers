@@ -1,0 +1,11 @@
+# Public keys allowed to sign update-manifest.txt, in ssh allowed_signers format:
+#
+#   release ssh-ed25519 AAAA... comment
+#
+# Generate a pair with:
+#   ssh-keygen -t ed25519 -N '' -C browser-print-agentd-release -f release-signing-key
+# then paste release-signing-key.pub here prefixed with the identity "release",
+# and store the PRIVATE key as the RELEASE_SIGNING_KEY GitHub Actions secret.
+#
+# While this file holds no key line, build-pkg.sh ships no updater at all: the
+# package installs an agent that never checks for updates.
