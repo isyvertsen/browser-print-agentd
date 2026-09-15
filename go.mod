@@ -1,3 +1,3 @@
-module github.com/sharaf-nassar/browser-print-agentd
+module github.com/isyvertsen/browser-print-agentd
 
 go 1.24

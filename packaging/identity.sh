@@ -20,14 +20,14 @@
 
 # The product name. Everything below is derived from it except BUNDLE_PREFIX,
 # which is the reverse-DNS namespace the maintainer actually controls
-# (sharaf-nassar.github.io), and PRODUCT_TITLE, which is prose.
+# (isyvertsen.github.io), and PRODUCT_TITLE, which is prose.
 PRODUCT_NAME="browser-print-agentd"
 PRODUCT_TITLE="Browser Print Agent"
 
 # launchd Label and productbuild package identifier — deliberately the same
 # string, as they have always been. Free-form reverse-DNS: the hyphen in the
 # account name is legal in both, because neither is resolved as a DNS name.
-BUNDLE_PREFIX="io.github.sharaf-nassar"
+BUNDLE_PREFIX="io.github.isyvertsen"
 BUNDLE_ID="${BUNDLE_PREFIX}.${PRODUCT_NAME}"
 
 # Installed payload.

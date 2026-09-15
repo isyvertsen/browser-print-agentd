@@ -67,7 +67,7 @@ convenience.** Do not rename it, and do not ship a release without it.
 GitHub serves a version-free redirect for whichever release is marked latest:
 
 ```text
-https://github.com/sharaf-nassar/browser-print-agentd/releases/latest/download/browser-print-agentd.pkg
+https://github.com/isyvertsen/browser-print-agentd/releases/latest/download/browser-print-agentd.pkg
 ```
 
 That URL answers `302` and lands on the newest release's notarized installer. The
@@ -99,7 +99,7 @@ different code path):
 
 ```bash
 env -u GITHUB_TOKEN -u GH_TOKEN curl -sIL \
-  https://github.com/sharaf-nassar/browser-print-agentd/releases/latest/download/browser-print-agentd.pkg \
+  https://github.com/isyvertsen/browser-print-agentd/releases/latest/download/browser-print-agentd.pkg \
   | grep -Ei '^(HTTP/|location:)'
 ```
 
@@ -108,12 +108,12 @@ Expect a `302` chain ending in `200`, with a `location:` naming the newest relea
 List what is currently downloadable:
 
 ```bash
-gh release list --repo sharaf-nassar/browser-print-agentd --limit 20
-gh release view v1.3.0 --repo sharaf-nassar/browser-print-agentd \
+gh release list --repo isyvertsen/browser-print-agentd --limit 20
+gh release view v1.3.0 --repo isyvertsen/browser-print-agentd \
   --json assets --jq '.assets[] | "\(.name)\t\(.size) bytes"'
 ```
 
-The [releases page](https://github.com/sharaf-nassar/browser-print-agentd/releases) is the same
+The [releases page](https://github.com/isyvertsen/browser-print-agentd/releases) is the same
 list in a browser, and is the only supported install source.
 
 ## Installing on a station
@@ -141,7 +141,7 @@ LaunchAgent — happens inside the package's `preinstall` and
 ### 1. Download the release installer
 
 ```bash
-gh release download v<version> --repo sharaf-nassar/browser-print-agentd \
+gh release download v<version> --repo isyvertsen/browser-print-agentd \
   --pattern 'browser-print-agentd-*.pkg' --dir ~/Downloads
 ```
 
@@ -205,7 +205,7 @@ Machine-wide payload:
 | `/usr/local/bin/browser-print-agentd` | print agent binary |
 | `/usr/local/bin/browser-print-agentd-uninstall` | complete uninstaller |
 | `/usr/local/libexec/browser-print-agentd/launcher` | per-user agent entry point |
-| `/Library/LaunchAgents/io.github.sharaf-nassar.browser-print-agentd.plist` | per-user print job |
+| `/Library/LaunchAgents/io.github.isyvertsen.browser-print-agentd.plist` | per-user print job |
 
 The cert and agent log remain per-account under
 `~/Library/Application Support/browser-print-agentd/` and
@@ -218,7 +218,7 @@ curl -fsS  http://127.0.0.1:9100/health       # version + every queue, healthy o
 curl -fsS  http://127.0.0.1:9100/available    # what the caller will be offered, healthy only
 curl -fsSk https://127.0.0.1:9101/available   # Safari path; only served when the cert exists
 curl -fsS  https://localhost:9101/available   # Safari trust path; intentionally no -k
-launchctl print gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd | head -20
+launchctl print gui/$(id -u)/io.github.isyvertsen.browser-print-agentd | head -20
 ```
 
 Then print one real label from the page that drives the printer. `postinstall` already refused to
@@ -235,15 +235,15 @@ that warning; re-running the installer is the supported repair.
 
 ### Per-station configuration
 
-`/Library/LaunchAgents/io.github.sharaf-nassar.browser-print-agentd.plist` is the only
+`/Library/LaunchAgents/io.github.isyvertsen.browser-print-agentd.plist` is the only
 configuration surface. Ports and bind address live in `ProgramArguments`; to lock the print routes
 (`/write` and `/print-pdf`) to one origin, append two more strings — `--origin-allow` and the
 allowed origin — then reload:
 
 ```bash
-sudo launchctl bootout gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd
+sudo launchctl bootout gui/$(id -u)/io.github.isyvertsen.browser-print-agentd
 sudo launchctl bootstrap gui/$(id -u) \
-  /Library/LaunchAgents/io.github.sharaf-nassar.browser-print-agentd.plist
+  /Library/LaunchAgents/io.github.isyvertsen.browser-print-agentd.plist
 ```
 
 Every flag also has an environment mirror (`BROWSER_PRINT_AGENTD_BIND`, `…_PORT`, `…_HTTPS_PORT`,
@@ -359,8 +359,8 @@ string.** Identify it by where it lives:
 | What to check      | Command                                                             | This agent                                       |
 | ------------------ | ------------------------------------------------------------------- | ------------------------------------------------ |
 | Binary on disk     | `lsof -nP -iTCP:9100 -sTCP:LISTEN`                                  | `/usr/local/bin/browser-print-agentd`            |
-| launchd label      | `launchctl print gui/$(id -u) \| grep -i print`                     | `io.github.sharaf-nassar.browser-print-agentd`   |
-| Installer receipt  | `pkgutil --pkg-info io.github.sharaf-nassar.browser-print-agentd`   | a receipt with a version and install date        |
+| launchd label      | `launchctl print gui/$(id -u) \| grep -i print`                     | `io.github.isyvertsen.browser-print-agentd`   |
+| Installer receipt  | `pkgutil --pkg-info io.github.isyvertsen.browser-print-agentd`   | a receipt with a version and install date        |
 | Advertised product | `curl -fsS http://127.0.0.1:9100/available`                         | every `Device` has `"provider":"browser-print-agentd"` |
 | Uninstaller        | `ls -l /usr/local/bin/browser-print-agentd-uninstall`               | present                                          |
 
@@ -379,7 +379,7 @@ that happens to be older.
 
    ```bash
    curl -fsS http://127.0.0.1:9100/health
-   pkgutil --pkg-info io.github.sharaf-nassar.browser-print-agentd
+   pkgutil --pkg-info io.github.isyvertsen.browser-print-agentd
    ```
 
    `GET /health` reports the running version, and every response also carries it as
@@ -391,7 +391,7 @@ that happens to be older.
    carries the version, so downgrading is picking a filename:
 
    ```bash
-   gh release download v<previous> --repo sharaf-nassar/browser-print-agentd \
+   gh release download v<previous> --repo isyvertsen/browser-print-agentd \
      --pattern 'browser-print-agentd-*.pkg' --dir ~/Downloads
    ```
 
@@ -497,9 +497,9 @@ Two flags matter (command line only — the package takes no options):
 Confirm the station is clean:
 
 ```bash
-launchctl print gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd  # "Could not find service"
+launchctl print gui/$(id -u)/io.github.isyvertsen.browser-print-agentd  # "Could not find service"
 lsof -nP -iTCP:9100 -sTCP:LISTEN ; lsof -nP -iTCP:9101 -sTCP:LISTEN        # expect no output
-pkgutil --pkg-info io.github.sharaf-nassar.browser-print-agentd            # expect "No receipt"
+pkgutil --pkg-info io.github.isyvertsen.browser-print-agentd            # expect "No receipt"
 security find-certificate -c localhost -a /Library/Keychains/System.keychain  # ours is gone
 ls ~/Library/Logs/browser-print-agentd 2>/dev/null                         # gone unless you kept a copy
 sudo ls /Library/Application\ Support/browser-print-agentd 2>/dev/null     # gone
@@ -545,7 +545,7 @@ If the agent answers but you are not sure it is *this* agent, see
 ### Agent not answering
 
 ```bash
-launchctl print gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd | head -30
+launchctl print gui/$(id -u)/io.github.isyvertsen.browser-print-agentd | head -30
 tail -50 ~/Library/Logs/browser-print-agentd/agent.log
 lsof -nP -iTCP:9100 -sTCP:LISTEN
 lsof -nP -iTCP:9101 -sTCP:LISTEN
@@ -578,7 +578,7 @@ domain** is in on-demand-only mode, and the symptom is a station that stays down
 intervenes. Confirm it in two commands:
 
 ```bash
-launchctl print gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd | grep -E 'state|pended'
+launchctl print gui/$(id -u)/io.github.isyvertsen.browser-print-agentd | grep -E 'state|pended'
 launchctl print gui/$(id -u) | grep 'on-demand count'
 ```
 
@@ -593,7 +593,7 @@ it.
 gate and takes effect immediately:
 
 ```bash
-launchctl kickstart gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd
+launchctl kickstart gui/$(id -u)/io.github.isyvertsen.browser-print-agentd
 curl -fsS http://127.0.0.1:9100/health
 ```
 
@@ -776,7 +776,7 @@ Three things make a sheet come out inverted anyway:
   ZPL model and `rastertolabel`. The agent log names this as a render or PPD validation error;
   confirm `/usr/sbin/cupsfilter` and the PPD path exist rather than changing queue defaults.
 - **The verdict is cached for five minutes.** After changing a queue's driver, either wait it out
-  or restart the agent with `launchctl kickstart -k gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd`.
+  or restart the agent with `launchctl kickstart -k gui/$(id -u)/io.github.isyvertsen.browser-print-agentd`.
 
 `POST /write` is unaffected in all cases: ZPL is sent raw and whatever `^PO` command the caller put
 in the label is what the printer obeys.
@@ -814,9 +814,9 @@ depends on it.
 | Which queues does the agent see? | `curl -fsS http://127.0.0.1:9100/health` (shows unhealthy too)                   |
 | What is the caller offered?      | `curl -fsS http://127.0.0.1:9100/available`                                      |
 | Which agent is this?             | `curl -fsS http://127.0.0.1:9100/available` — read `provider`                    |
-| Is the job registered?           | `launchctl print gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd`      |
+| Is the job registered?           | `launchctl print gui/$(id -u)/io.github.isyvertsen.browser-print-agentd`      |
 | Why won't launchd start it?      | `launchctl print gui/$(id -u) \| grep 'on-demand count'`                         |
-| Start it right now               | `launchctl kickstart gui/$(id -u)/io.github.sharaf-nassar.browser-print-agentd`  |
+| Start it right now               | `launchctl kickstart gui/$(id -u)/io.github.isyvertsen.browser-print-agentd`  |
 | What did the agent log?          | `~/Library/Logs/browser-print-agentd/agent.log`                                  |
 
 `GET /health` is the one to reach for first: unlike `/available`, which hides unhealthy printers so

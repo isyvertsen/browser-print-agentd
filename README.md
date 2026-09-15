@@ -16,6 +16,22 @@ endorsed, sponsored, certified, or supported by Zebra Technologies Corporation. 
 "Browser Print", and "ZPL" are trademarks of their respective owners and appear here only to
 name the wire contract this agent emulates.
 
+**This is a fork.** The original is
+[sharaf-nassar/browser-print-agentd](https://github.com/sharaf-nassar/browser-print-agentd) by
+Sharaf Nassar, MIT licensed, and the wire contract, CUPS spooling, health-gated failover and
+origin posture are all upstream's work. This fork, maintained by Ivar Syvertsen, differs in two
+deliberate ways:
+
+- **No automatic updater.** Upstream ships a root LaunchDaemon that downloads and installs
+  releases every hour. Here nothing on the machine updates itself or has network egress;
+  upgrading is always an installer you run.
+- **The installer never removes other software.** Upstream's `preinstall` deleted Zebra Browser
+  Print by path glob, as root. Here it refuses to install while another agent holds ports
+  9100/9101 and tells you to quit or uninstall that program yourself.
+
+The bundle id, launchd label and package identifier are `io.github.isyvertsen.…`, so this fork
+and upstream never overwrite each other's install receipts.
+
 **Running this on a station?** [`RUNBOOK.md`](./RUNBOOK.md) is the admin-facing guide: install,
 migrate from another localhost print agent, roll back, uninstall, diagnose a station that will not
 print, and validate one on real hardware.
@@ -24,7 +40,7 @@ print, and validate one on real hardware.
 
 You need a Mac with Apple Silicon and your Mac's administrator password.
 
-**[Download the installer](https://github.com/sharaf-nassar/browser-print-agentd/releases/latest/download/browser-print-agentd.pkg)**
+**[Download the installer](https://github.com/isyvertsen/browser-print-agentd/releases/latest/download/browser-print-agentd.pkg)**
 
 Open the downloaded file, follow the prompts, and enter your Mac password when it asks. When it
 finishes, label printing works. There is no application to launch and no next step.
@@ -92,7 +108,7 @@ Installed layout:
 | `/usr/local/bin/browser-print-agentd-uninstall`                            | the uninstaller                    |
 | `/Applications/Uninstall Browser Print Agent.app`                          | GUI front end for the uninstaller  |
 | `/usr/local/libexec/browser-print-agentd/launcher`                         | agent launchd entry point          |
-| `/Library/LaunchAgents/io.github.sharaf-nassar.browser-print-agentd.plist` | per-user LaunchAgent               |
+| `/Library/LaunchAgents/io.github.isyvertsen.browser-print-agentd.plist` | per-user LaunchAgent               |
 | `~/Library/Application Support/browser-print-agentd/`                      | `cert.pem` and `key.pem`           |
 | `~/Library/Logs/browser-print-agentd/`                                     | private, bounded per-user log ring |
 

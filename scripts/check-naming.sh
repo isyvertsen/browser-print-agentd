@@ -80,7 +80,7 @@ IDENTITY_GO="identity.go"
 # The account the public module lives under. The product half of the module path
 # is derived from the identity source below rather than restated, so a rename is
 # still a one-line edit in packaging/identity.sh.
-EXPECTED_MODULE_HOST="github.com/sharaf-nassar"
+EXPECTED_MODULE_HOST="github.com/isyvertsen"
 
 # Frozen by the wire contract: the SPA's transport reads this header and the
 # Browser Print `Device` shape can never grow a version field, so this string is
