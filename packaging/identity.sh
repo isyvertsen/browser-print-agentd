@@ -40,6 +40,34 @@ LAUNCHER_PATH="${LIBEXEC_DIR}/launcher"
 PLIST_NAME="${BUNDLE_ID}.plist"
 AGENT_PLIST_PATH="/Library/LaunchAgents/${PLIST_NAME}"
 
+# The optional updater: a short-lived root LaunchDaemon that installs the
+# release a SIGNED manifest names. It is shipped only when packaging/
+# allowed_signers holds at least one key line; otherwise none of these paths
+# exist on a station and postinstall/uninstall find nothing to register.
+UPDATER_NAME="updater"
+UPDATER_PATH="${LIBEXEC_DIR}/${UPDATER_NAME}"
+UPDATER_LABEL="${BUNDLE_ID}.updater"
+UPDATER_PLIST_NAME="${UPDATER_LABEL}.plist"
+UPDATER_PLIST_PATH="/Library/LaunchDaemons/${UPDATER_PLIST_NAME}"
+ALLOWED_SIGNERS_PATH="${LIBEXEC_DIR}/allowed_signers"
+# ssh-keygen -Y identity and namespace the manifest is signed under. Both are
+# part of what a signature commits to, so a signature made for another product
+# or purpose does not verify here even with the same key.
+SIGNER_IDENTITY="release"
+SIGN_NAMESPACE="${PRODUCT_NAME}-release"
+
+# Where the updater looks. The default is this repository's GitHub Releases;
+# a private build overrides it at build time with UPDATE_BASE_URL. The layout
+# under it is GitHub's: latest/download/<asset> and download/v<X.Y.Z>/<asset>.
+UPDATE_BASE_URL="${UPDATE_BASE_URL:-https://github.com/${BUNDLE_PREFIX#io.github.}/${PRODUCT_NAME}/releases}"
+
+# Root-owned updater state and logging, separate from the agent's per-account
+# support and log directories below.
+SYSTEM_SUPPORT_DIR="/Library/Application Support/${PRODUCT_NAME}"
+UPDATE_STATE_DIR="${SYSTEM_SUPPORT_DIR}/updater"
+UPDATE_STATUS_PATH="${SYSTEM_SUPPORT_DIR}/update-status"
+SYSTEM_LOG_DIR="/Library/Logs/${PRODUCT_NAME}"
+
 # Per-account directories, relative to a home directory. Names only: the home
 # they hang off is resolved at install time against the station account, never
 # against root.

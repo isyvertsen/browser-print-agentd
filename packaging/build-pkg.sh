@@ -46,7 +46,9 @@
 #   -h, --help                 This message.
 #
 # Environment equivalents: VERSION, ARCH, OUTPUT_DIR, APP_SIGNING_IDENTITY,
-# INSTALLER_SIGNING_IDENTITY, STAGE_ONLY, GO_LDFLAGS.
+# INSTALLER_SIGNING_IDENTITY, STAGE_ONLY, GO_LDFLAGS, and UPDATE_BASE_URL (the
+# release feed the shipped updater polls; defaults to this repository's
+# GitHub Releases, see identity.sh).
 
 set -euo pipefail
 
@@ -230,6 +232,19 @@ render_template() {
 		-e "s|__LAUNCHER_PATH__|$LAUNCHER_PATH|g" \
 		-e "s|__PLIST_NAME__|$PLIST_NAME|g" \
 		-e "s|__AGENT_PLIST_PATH__|$AGENT_PLIST_PATH|g" \
+		-e "s|__UPDATER_NAME__|$UPDATER_NAME|g" \
+		-e "s|__UPDATER_PATH__|$UPDATER_PATH|g" \
+		-e "s|__UPDATER_LABEL__|$UPDATER_LABEL|g" \
+		-e "s|__UPDATER_PLIST_NAME__|$UPDATER_PLIST_NAME|g" \
+		-e "s|__UPDATER_PLIST_PATH__|$UPDATER_PLIST_PATH|g" \
+		-e "s|__ALLOWED_SIGNERS_PATH__|$ALLOWED_SIGNERS_PATH|g" \
+		-e "s|__SIGNER_IDENTITY__|$SIGNER_IDENTITY|g" \
+		-e "s|__SIGN_NAMESPACE__|$SIGN_NAMESPACE|g" \
+		-e "s|__UPDATE_BASE_URL__|$UPDATE_BASE_URL|g" \
+		-e "s|__SYSTEM_SUPPORT_DIR__|$SYSTEM_SUPPORT_DIR|g" \
+		-e "s|__UPDATE_STATE_DIR__|$UPDATE_STATE_DIR|g" \
+		-e "s|__UPDATE_STATUS_PATH__|$UPDATE_STATUS_PATH|g" \
+		-e "s|__SYSTEM_LOG_DIR__|$SYSTEM_LOG_DIR|g" \
 		-e "s|__SUPPORT_DIR_NAME__|$SUPPORT_DIR_NAME|g" \
 		-e "s|__LOG_DIR_NAME__|$LOG_DIR_NAME|g" \
 		-e "s|__LOG_FILE_NAME__|$LOG_FILE_NAME|g" \
@@ -266,6 +281,25 @@ render_template "$PACKAGING_DIR/uninstall.sh.in" \
 	"$PAYLOAD_DIR$UNINSTALLER_PATH" 755
 render_template "$PACKAGING_DIR/launchagent.plist.in" \
 	"$PAYLOAD_DIR$AGENT_PLIST_PATH" 644
+
+# The updater ships only when there is a key to trust. A signers file with no
+# key line means the package installs an agent that never checks for updates,
+# and postinstall/uninstall see no updater plist and skip it.
+signer_keys="$(grep -cE '^[^#[:space:]]+[[:space:]]+ssh-(ed25519|rsa|ecdsa)' \
+	"$PACKAGING_DIR/allowed_signers" 2>/dev/null || true)"
+if [ "${signer_keys:-0}" -gt 0 ]; then
+	log "shipping the updater: $signer_keys signing key(s), feed $UPDATE_BASE_URL"
+	mkdir -p "$PAYLOAD_DIR/Library/LaunchDaemons"
+	render_template "$PACKAGING_DIR/updater.sh.in" \
+		"$PAYLOAD_DIR$UPDATER_PATH" 755
+	render_template "$PACKAGING_DIR/updater.plist.in" \
+		"$PAYLOAD_DIR$UPDATER_PLIST_PATH" 644
+	grep -vE '^[[:space:]]*(#|$)' "$PACKAGING_DIR/allowed_signers" \
+		>"$PAYLOAD_DIR$ALLOWED_SIGNERS_PATH"
+	chmod 644 "$PAYLOAD_DIR$ALLOWED_SIGNERS_PATH"
+else
+	log "no key in packaging/allowed_signers: the updater is NOT shipped"
+fi
 render_template "$PACKAGING_DIR/scripts/preinstall.in" "$SCRIPTS_DIR/preinstall" 755
 render_template "$PACKAGING_DIR/scripts/postinstall.in" "$SCRIPTS_DIR/postinstall" 755
 render_template "$PACKAGING_DIR/distribution.xml.in" "$STAGE_DIR/distribution.xml" 644
@@ -326,6 +360,10 @@ fi
 
 plutil -lint "$PAYLOAD_DIR$AGENT_PLIST_PATH" >/dev/null ||
 	fail "the LaunchAgent plist failed plutil -lint"
+if [ -f "$PAYLOAD_DIR$UPDATER_PLIST_PATH" ]; then
+	plutil -lint "$PAYLOAD_DIR$UPDATER_PLIST_PATH" >/dev/null ||
+		fail "the updater LaunchDaemon plist failed plutil -lint"
+fi
 
 if [ -n "$APP_SIGNING_IDENTITY" ]; then
 	log "codesigning the binary with the hardened runtime"

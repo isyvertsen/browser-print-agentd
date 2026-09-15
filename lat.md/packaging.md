@@ -53,7 +53,8 @@ Every shipped packaging artifact is a `.in` template that `packaging/build-pkg.s
 from the repository.
 
 The template set is `launchagent.plist.in`, `distribution.xml.in`,
-`launcher.sh.in`, `uninstall.sh.in`, `scripts/preinstall.in`,
+`launcher.sh.in`, `uninstall.sh.in`, `scripts/preinstall.in`, and — only when
+`packaging/allowed_signers` carries a key — `updater.sh.in` and `updater.plist.in`, plus
 `scripts/postinstall.in`, `component.plist.in`, and the two that make up the uninstaller app
 ([[packaging#Packaging#Station Installer#Uninstaller#The Uninstaller App]]):
 `uninstall-app-info.plist.in` and `uninstall-app.sh.in`. Rendering fills the launchd label and
@@ -180,6 +181,19 @@ automatically in ~3 s — inside `ThrottleInterval=10`, with no plist edit invol
 documented transient condition tied to a staged OS update, not a packaging defect, and keeping
 stations current on macOS is therefore an availability requirement. The plist comment carries the
 diagnosis so the next reader does not go hunting for a `KeepAlive` variant that does not exist.
+
+### Optional Updater
+
+The updater LaunchDaemon and its script are staged only when `packaging/allowed_signers` holds a
+key line; a package built without one carries no updater and its scripts find nothing to register.
+
+`build-pkg.sh` counts key lines in `allowed_signers` and, for a positive count, renders
+`updater.sh.in` and `updater.plist.in`, copies the comment-stripped signers file to
+`${ALLOWED_SIGNERS_PATH}`, and creates `/Library/LaunchDaemons` in the payload. `postinstall`
+registers the daemon only if its plist is present, and `uninstall` boots it out best-effort so a
+package without it uninstalls identically. `UPDATE_BASE_URL` is rendered into the script at build
+time and defaults, in `identity.sh`, to this repository's GitHub Releases. The design is in
+[[operations#Station Operations#Signed Updates From A Feed You Choose]].
 
 ### Preinstall And Postinstall
 

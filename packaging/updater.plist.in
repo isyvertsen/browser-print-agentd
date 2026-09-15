@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Short-lived root updater for __PRODUCT_NAME__.
+
+  Rendered by build-pkg.sh from packaging/identity.sh and installed as
+  __UPDATER_PLIST_PATH__. This is deliberately separate from the per-user
+  LaunchAgent: only this process has network egress or installation privilege.
+
+  RunAtLoad covers a reboot, and is the reason the script waits for a console
+  user rather than testing once: this job starts before anyone has logged in.
+
+  Production checks run hourly, on the hour, and the updater adds up to 300
+  seconds (5 minutes) of jitter before its network request, which is what keeps
+  a fleet firing at :00 from arriving together.
+
+  StartCalendarInterval rather than StartInterval, and the difference is the
+  whole point: launchd.plist(5) states that a StartInterval firing which falls
+  while the system is asleep "will be missed due to shortcomings in kqueue(3)",
+  whereas a StartCalendarInterval job is started "the next time the computer
+  wakes up", with multiple missed intervals coalesced into one. A station that
+  sleeps overnight would otherwise wake and simply wait for the next interval,
+  and RunAtLoad does not help because waking is not loading.
+
+  KeepAlive is intentionally absent; a fresh process reads the currently
+  installed script on every run and cannot be killed by its own package
+  replacement.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>__UPDATER_LABEL__</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>__UPDATER_PATH__</string>
+	</array>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

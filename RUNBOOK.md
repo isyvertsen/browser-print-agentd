@@ -18,6 +18,7 @@ run by an admin, on purpose.
 - [Releases and where the installers live](#releases-and-where-the-installers-live)
 - [Installing on a station](#installing-on-a-station)
 - [Station configuration](#station-configuration)
+- [Managing automatic updates](#managing-automatic-updates)
 - [Migrating from another localhost print agent](#migrating-from-another-localhost-print-agent)
 - [Rolling back to the previous release](#rolling-back-to-the-previous-release)
 - [Uninstalling](#uninstalling)
@@ -282,6 +283,93 @@ lpstat -v          # confirm the device URI the agent will hash into the uid
 
 `lpadmin -m raw` exits 1 with `Raw queues are no longer supported on macOS.` The `zebra.ppd` queue
 is correct because the agent always spools with `lp -o raw`, which bypasses the filter.
+
+## Managing automatic updates
+
+A package built from a checkout whose `packaging/allowed_signers` holds no key carries **no
+updater**: nothing on the station ever checks for a release, and upgrading is a newer installer
+run by hand. Everything below applies only to a package built with a key.
+
+### What the updater is
+
+A short-lived root LaunchDaemon, `io.github.isyvertsen.browser-print-agentd.updater`, runs at load
+and hourly on the hour with up to five minutes of jitter, and exits. Each run:
+
+1. fetches `latest/download/update-manifest.txt` and `update-manifest.txt.sig` from the feed URL
+   baked into the package at build time;
+2. verifies the signature with `ssh-keygen -Y verify` against
+   `/usr/local/libexec/browser-print-agentd/allowed_signers` — a manifest that does not verify is
+   discarded before any field of it is read;
+3. compares the manifest's version with the installed receipt; **any difference installs**, not
+   only a higher version, so moving the feed back to an older release rolls stations back;
+4. downloads the named package and checks its SHA-256 against the signed manifest;
+5. if the installed binary is Developer ID signed, additionally requires the package to be signed
+   by the same Team ID and notarized; an unsigned build logs that it is relying on the manifest;
+6. caches a verified copy of the *current* release first, installs, probes `/health` until the
+   new version answers, and on failure reinstalls the cached package and quarantines the version.
+
+It logs to `/Library/Logs/browser-print-agentd/update.log` and publishes a one-line status to
+`/Library/Application Support/browser-print-agentd/update-status`.
+
+### Pin or resume a station
+
+```bash
+sudo launchctl disable system/io.github.isyvertsen.browser-print-agentd.updater   # pin
+sudo launchctl enable  system/io.github.isyvertsen.browser-print-agentd.updater   # resume
+sudo launchctl kickstart system/io.github.isyvertsen.browser-print-agentd.updater # check now
+```
+
+The pin is a launchd override and survives package upgrades. A reboot also forces a check;
+logging out and in does not.
+
+### Running your own feed
+
+The feed is a static directory. Any HTTPS file server works — nginx, Caddy, S3, or a directory
+behind Cloudflare Tunnel, which needs no open inbound port and no certificate of your own. Lay it
+out exactly as GitHub Releases does, because that is the shape the updater expects:
+
+```text
+latest/download/update-manifest.txt
+latest/download/update-manifest.txt.sig
+latest/download/browser-print-agentd-X.Y.Z.pkg
+download/vX.Y.Z/browser-print-agentd-X.Y.Z.pkg
+download/vX.Y.Z/browser-print-agentd-X.Y.Z.pkg.sha256
+```
+
+Keep every `download/vX.Y.Z/` directory: the updater downloads the *current* version from there as
+its rollback cache before it will replace anything. Serve `update-manifest.txt` with
+`Cache-Control: no-store` if a CDN sits in front, or stations will keep seeing the old version.
+
+Build the package for that feed with the URL set at build time:
+
+```bash
+UPDATE_BASE_URL=https://updates.example.no/browser-print-agentd packaging/build-pkg.sh --version X.Y.Z
+```
+
+Sign the manifest with the same key whose public half is in `packaging/allowed_signers`:
+
+```bash
+printf 'version=%s\nasset=%s\nsha256=%s\n' X.Y.Z browser-print-agentd-X.Y.Z.pkg "$(shasum -a 256 browser-print-agentd-X.Y.Z.pkg | cut -c1-64)" > update-manifest.txt
+ssh-keygen -Y sign -f release-signing-key -n browser-print-agentd-release update-manifest.txt
+```
+
+### Updater troubleshooting
+
+```bash
+sudo tail -50 /Library/Logs/browser-print-agentd/update.log
+cat /Library/Application\ Support/browser-print-agentd/update-status
+sudo launchctl print-disabled system | grep browser-print-agentd.updater
+```
+
+| Status | Meaning |
+| ------ | ------- |
+| `current` / `updated` | Nothing to do, or the install and version probe succeeded. |
+| `skipped-no-user` | Nobody was logged in at the console; the next run checks again. |
+| `manifest-fetch-failed` / `signature-fetch-failed` / `package-fetch-failed` | The feed was unreachable. Nothing changed. |
+| `signature-invalid` | The manifest is not signed by a key in `allowed_signers`. Nothing changed. Check the key in the release pipeline before anything else. |
+| `no-signer` | The package shipped an updater but no `allowed_signers`; it refuses to run. Rebuild the package. |
+| `checksum-failed` / `trust-failed` | The package did not match the signed manifest, or failed the Apple signature check. Nothing changed. Do not bypass it. |
+| `rolled-back` / `rollback-failed` / `quarantined` | The new version failed its health probe. The previous package was restored (or not); the version will not be retried. |
 
 ## Migrating from another localhost print agent
 

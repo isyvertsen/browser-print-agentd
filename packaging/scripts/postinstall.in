@@ -27,9 +27,10 @@
 #      station cert before mutating trust. Existing trust is left untouched;
 #      first installs add SSL-only trust and prove it with the same normal TLS
 #      probe. This keeps upgrades noninteractive without weakening Safari.
-#
-# There is no automatic updater. Upgrading is a re-run of a newer installer,
-# which is the operator's decision every time.
+#   5. If the package carries the updater LaunchDaemon, register it in the
+#      system domain without disturbing an already-running update or an
+#      administrator's disabled pin. A package built without a signing key
+#      carries no updater, and this step finds nothing to do.
 #
 # Everything under a home directory is per-account by design: the agent is a
 # per-user LaunchAgent (plan Q6). Stations run one shared login, so that means
@@ -46,6 +47,13 @@ BINARY="__BINARY_PATH__"
 LAUNCHER="__LAUNCHER_PATH__"
 UNINSTALLER="__UNINSTALLER_PATH__"
 AGENT_PLIST="/Library/LaunchAgents/${LABEL}.plist"
+UPDATER="__UPDATER_PATH__"
+UPDATER_LABEL="__UPDATER_LABEL__"
+UPDATER_PLIST="__UPDATER_PLIST_PATH__"
+SYSTEM_SUPPORT_DIR="__SYSTEM_SUPPORT_DIR__"
+UPDATE_STATE_DIR="__UPDATE_STATE_DIR__"
+SYSTEM_LOG_DIR="__SYSTEM_LOG_DIR__"
+INSTALL_MARKER="/var/run/__PRODUCT_NAME__-installing"
 SYSTEM_KEYCHAIN="/Library/Keychains/System.keychain"
 
 HTTP_PORT=9100
@@ -312,6 +320,50 @@ else
 		fail "the station cert was added to the System keychain, but a normal HTTPS trust probe still failed for https://localhost:$HTTPS_PORT/available. Safari trust is not usable."
 	fi
 	log "station cert trust established and verified"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Register the updater, if this package carries one
+# ---------------------------------------------------------------------------
+
+if [ -f "$UPDATER_PLIST" ] && [ -f "$UPDATER" ]; then
+	/bin/chmod 755 "$UPDATER"
+	/usr/sbin/chown root:wheel "$UPDATER_PLIST"
+	/bin/chmod 644 "$UPDATER_PLIST"
+	/usr/bin/plutil -lint "$UPDATER_PLIST" >/dev/null ||
+		fail "$UPDATER_PLIST is not a valid property list"
+	for path in "$SYSTEM_SUPPORT_DIR" "$UPDATE_STATE_DIR" "$SYSTEM_LOG_DIR"; do
+		[ ! -L "$path" ] || fail "refusing symlinked updater directory: $path"
+	done
+	/bin/mkdir -p "$UPDATE_STATE_DIR" "$SYSTEM_LOG_DIR"
+	/usr/sbin/chown root:wheel "$SYSTEM_SUPPORT_DIR" "$UPDATE_STATE_DIR" "$SYSTEM_LOG_DIR"
+	/bin/chmod 755 "$SYSTEM_SUPPORT_DIR"
+	/bin/chmod 700 "$UPDATE_STATE_DIR"
+	/bin/chmod 755 "$SYSTEM_LOG_DIR"
+
+	# A running updater job is left alone during install-over-install: booting
+	# it out here would kill the process that invoked installer. The launchd
+	# disabled override is also left untouched, so an administrator's pin
+	# survives every upgrade.
+	if /bin/launchctl print "system/$UPDATER_LABEL" >/dev/null 2>&1; then
+		log "updater $UPDATER_LABEL is already registered"
+	elif /bin/launchctl print-disabled system 2>/dev/null |
+		/usr/bin/grep -Fq "\"$UPDATER_LABEL\" => disabled"; then
+		log "updater $UPDATER_LABEL is pinned disabled; leaving it inactive"
+	else
+		log "bootstrapping updater $UPDATER_LABEL in the system domain"
+		/usr/bin/touch "$INSTALL_MARKER"
+		/usr/sbin/chown root:wheel "$INSTALL_MARKER"
+		/bin/chmod 600 "$INSTALL_MARKER"
+		if ! /bin/launchctl bootstrap system "$UPDATER_PLIST"; then
+			/bin/rm -f "$INSTALL_MARKER"
+			fail "launchctl could not bootstrap $UPDATER_PLIST in the system domain"
+		fi
+		/bin/rm -f "$INSTALL_MARKER"
+	fi
+	log "pin this station to its current build with: sudo launchctl disable system/$UPDATER_LABEL"
+else
+	log "this package carries no updater; upgrades are installer runs"
 fi
 
 log "allow your web app to print: add its origin to $ORIGINS_FILE"

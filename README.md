@@ -22,9 +22,11 @@ Sharaf Nassar, MIT licensed, and the wire contract, CUPS spooling, health-gated 
 origin posture are all upstream's work. This fork, maintained by Ivar Syvertsen, differs in four
 deliberate ways:
 
-- **No automatic updater.** Upstream ships a root LaunchDaemon that downloads and installs
-  releases every hour. Here nothing on the machine updates itself or has network egress;
-  upgrading is always an installer you run.
+- **Updates are opt-in and signed by you.** Upstream's package always shipped a root
+  LaunchDaemon that installed whatever GitHub's latest release said, trusting Apple's notarization
+  of the maintainer's build. Here the updater ships only when the package is built with a signing
+  key you own, polls a feed URL you choose, and installs only what a manifest signed with that key
+  names. A checkout with no key builds a package that never phones home.
 - **The installer never removes other software.** Upstream's `preinstall` deleted Zebra Browser
   Print by path glob, as root. Here it refuses to install while another agent holds ports
   9100/9101 and tells you to quit or uninstall that program yourself.
@@ -67,9 +69,28 @@ so macOS will open it without warnings.
 
 ## Updates
 
-The agent does not update itself and never makes a network request. To upgrade, download and
-run a newer installer over the existing one; to downgrade, run an older one. Either way it is a
-normal install and nothing has to be removed first.
+The agent itself never makes a network request. Whether the *package* keeps itself current is a
+build-time choice:
+
+- **Built without a signing key** (the default for a checkout), the package carries no updater.
+  To upgrade, run a newer installer over the existing one; to downgrade, run an older one. Either
+  way it is a normal install and nothing has to be removed first.
+- **Built with a key in `packaging/allowed_signers`**, the package also installs a short-lived root
+  LaunchDaemon that checks a release feed hourly and installs whatever a **signed** manifest names.
+  The feed URL is baked in at build time (`UPDATE_BASE_URL`; default: this repository's GitHub
+  Releases) and can be any HTTPS file server you control — behind Cloudflare Tunnel, for example.
+  Trust never comes from the server: the manifest is verified with `ssh-keygen -Y verify` against
+  the public key shipped in the package, and the package's SHA-256 is read from that signed
+  manifest. If the installed binary is Apple-signed, the downloaded package must also be signed by
+  the same Team ID and notarized. Pin a station with
+  `sudo launchctl disable system/io.github.isyvertsen.browser-print-agentd.updater`.
+
+To set the feed up: generate a key with
+`ssh-keygen -t ed25519 -N '' -C browser-print-agentd-release -f release-signing-key`, paste the
+public key into `packaging/allowed_signers` as `release ssh-ed25519 AAAA…`, store the private key
+as the `RELEASE_SIGNING_KEY` Actions secret, and tag a release. The workflow signs
+`update-manifest.txt`, verifies it against `allowed_signers` before publishing, and attaches
+both. See `RUNBOOK.md` for the feed layout and how to point stations at your own server.
 
 ## Uninstall
 

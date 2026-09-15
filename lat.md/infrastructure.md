@@ -202,13 +202,17 @@ version string drives the linker stamp, the package version `build-pkg.sh` hands
 that asset name, so the release path can predict the package path and hard-fail when the script
 writes something else instead of discovering whatever it happened to produce.
 
-Only after the package passes notarization, stapling, and the quarantined Gatekeeper assessment
+Only after the package passes whatever signing gates are provisioned — Developer ID plus
+notarization when `APPLE_CERTIFICATE` exists, nothing Apple-side otherwise, with a warning —
 does the workflow derive its checksum asset. `<pkg>.sha256` is one `shasum`-compatible line
-containing the lowercase package digest and exact installer asset name, and the workflow verifies
-it back against the package with `shasum -c` before upload. It also asserts both asset names
-rather than trusting path construction. The package and checksum are uploaded together, and the
-release is marked `--latest` explicitly so the evergreen `releases/latest/download/…` URL
-resolves to a release that has every asset attached.
+containing the lowercase package digest and exact installer asset name, verified back against the
+package with `shasum -c` before upload. When `RELEASE_SIGNING_KEY` exists the workflow also writes
+`update-manifest.txt` (`version`, `asset`, `sha256`), signs it with `ssh-keygen -Y sign` under the
+namespace from `identity.sh`, and verifies the signature against the checked-in
+`packaging/allowed_signers` so a secret rotated without the repository fails here. Package,
+checksum, and (if present) manifest and signature are uploaded together, and the release is marked
+`--latest` explicitly so the evergreen `releases/latest/download/…` URL resolves to a release that
+has every asset attached.
 
 Retention is only real if a run proves it, so the run that ships a build also names the build a
 station falls back to: after upload the previous `v*` release is read back and its installer and
