@@ -93,8 +93,8 @@ the installer's cert generation uses `browser-print-openssl`, so temp files shar
 ## Station Installer
 
 What the `.pkg` actually does to a station. It is a `.pkg` and not a drag-install `.dmg` because
-everything install must do — remove the vendor's own Browser Print, trust a cert, register a
-launchd job — is a root action.
+everything install must do — trust a cert, register a launchd job, prove the ports are free —
+is a root action.
 
 ### LaunchAgent, Not LaunchDaemon
 
@@ -114,8 +114,9 @@ than straight at the binary, because launchd does not expand a home directory in
 `StandardOutPath`/`StandardErrorPath`. The launcher resolves `$HOME`, exports the identity-derived
 log path, and sends otherwise-unused stdout/stderr to `/dev/null`; the daemon opens the path and
 owns all normal output. Failures before the daemon logger exists go to unified logging through
-`logger`. The plist is also the per-station configuration surface — ports, bind address, and the
-optional origin allowlist are edited there and nowhere else, and no origin ships in the package.
+`logger`. The plist is the root-owned configuration surface — ports, bind address, the printer
+match and a static origin allowlist — while the per-account `allowed-origins.txt` next to the
+cert pair is the one an operator edits without root; no origin ships in the package.
 
 ### Request Log Ownership And Rotation
 

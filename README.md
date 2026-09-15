@@ -191,7 +191,13 @@ no Apple hardware.
 ```bash
 packaging/build-pkg.sh --stage-only          # layout check, no macOS needed
 packaging/build-pkg.sh --version 0.1.0       # full build (macOS)
+packaging/dev-run.sh                         # run it on this Mac, as you, no installer
 ```
+
+`dev-run.sh` builds the binary and registers it as a per-user LaunchAgent under a `.dev` label
+with no administrator password: no certificate, no `:9101`, no updater, but the same ports and
+the same allowlist file, so a web app in Chrome can print through it right away. `--status` and
+`--remove` do what they say.
 
 Its environment interface, equivalent to the flags:
 

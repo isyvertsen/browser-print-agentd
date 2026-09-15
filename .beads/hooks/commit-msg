@@ -1,3 +1,0 @@
-#!/bin/sh
-# codex-commit-message-validator
-exec python3 "/home/mamba/.claude/hooks/commit_message_validator.py" --message-file "$1"
