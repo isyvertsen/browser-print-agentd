@@ -96,6 +96,16 @@ Verifies a ~540 KB `^GFA` payload — the size of a 4×6 label — reaches `lp` 
 that the invocation carries `-o raw`, without which the `zebra.ppd` filter would rasterize the
 ZPL and print the label as a picture of itself.
 
+### Write Succeeds Only Once The Printer Takes The Job
+
+Verifies `/write` answers 200 only after the job leaves the CUPS queue, and fails a job CUPS
+cancelled, because leaving the not-completed list alone does not mean it reached the printer.
+
+### Undelivered Job Is Cancelled At The Deadline
+
+Verifies a job the printer never takes fails `/write` and `/print-pdf` with a plain-text 500 at the
+request deadline, is cancelled in CUPS so it cannot print later, and triggers no failover.
+
 ### Print PDF Spools A Document Without Raw
 
 Verifies `POST /print-pdf` for an ordinary non-inverting queue decodes its base64 payload, spools

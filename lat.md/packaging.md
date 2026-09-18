@@ -36,8 +36,8 @@ the usage text, the advertised `Device.provider`, and [[identity.go#envPrefix]] 
 hyphens turned into underscores so it cannot drift from `identity.sh:ENV_PREFIX`.
 
 [[identity.go#tempPrefix]] is the one value restated rather than derived, mirroring
-`identity.sh:TEMP_PREFIX`. It is deliberately shorter than the product name so the Go spool files
-(`browser-print-*.zpl`) and the installer's `mktemp` templates share one visibly common prefix in
+`identity.sh:TEMP_PREFIX`. It is deliberately shorter than the product name so the Go render directories
+(`browser-print-render-*`) and the installer's `mktemp` templates share one visibly common prefix in
 `/tmp`, which is what makes an orphaned file attributable at a glance.
 
 The environment rename is breaking on purpose and ships **no** compatibility reader for the

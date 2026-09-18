@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -77,11 +76,16 @@ const (
 	// truncating that job would be worse than answering slowly.
 	cupsPrintTimeout = 15 * time.Second
 
-	// Spool-file suffixes. CUPS sniffs content rather than trusting an
-	// extension, so these are for a human reading `ls` on a wedged station's
-	// temp directory, not for the filter chain.
-	zplSuffix = ".zpl"
-	pdfSuffix = ".pdf"
+	// deliveryPollInterval is how often a spooled job is checked for having
+	// left the CUPS queue. A reachable printer takes a label in well under a
+	// second, so this adds at most a quarter second to a successful print.
+	deliveryPollInterval = 250 * time.Millisecond
+
+	// Job-state reasons CUPS reports on the `Alerts:` line of a completed job
+	// that ended WITHOUT reaching the printer. A cancelled or aborted job also
+	// leaves the not-completed list, so leaving it is not by itself delivery.
+	canceledJobReason = "canceled"
+	abortedJobReason  = "aborted"
 
 	// restoreSavedConfiguration recalls the printer's last ^JUS-saved settings.
 	// The inverting CUPS label driver sends ^POI, and ^PO is retained by the
@@ -129,6 +133,10 @@ func (b *boundedCapture) String() string {
 // ever required (and no label is ever spooled).
 type execRunner interface {
 	Run(ctx context.Context, name string, args ...string) (execResult, error)
+
+	// RunInput is Run with input fed to the command's standard input. It is how
+	// a job reaches `lp` without the agent ever writing the label to disk.
+	RunInput(ctx context.Context, input []byte, name string, args ...string) (execResult, error)
 }
 
 // osRunner runs commands for real via os/exec.
@@ -138,8 +146,18 @@ type osRunner struct{}
 // normal result, not an error — only a missing binary or an expired context is
 // returned as an error, because those are the two cases a caller must not
 // mistake for "the queue said no".
-func (osRunner) Run(ctx context.Context, name string, args ...string) (execResult, error) {
+func (runner osRunner) Run(ctx context.Context, name string, args ...string) (execResult, error) {
+	return runner.RunInput(ctx, nil, name, args...)
+}
+
+// RunInput is Run with input on the command's standard input.
+func (osRunner) RunInput(
+	ctx context.Context, input []byte, name string, args ...string,
+) (execResult, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	if input != nil {
+		cmd.Stdin = bytes.NewReader(input)
+	}
 	stdout := boundedCapture{limit: maxFilterOutputBytes}
 	stderr := boundedCapture{limit: maxFilterErrorBytes}
 	cmd.Stdout = &stdout
@@ -291,7 +309,7 @@ func (c *cupsClient) deviceURIs(ctx context.Context) ([]queueDevice, error) {
 func (c *cupsClient) printRaw(ctx context.Context, queue string, data []byte) (string, error) {
 	c.printOrder.RLock()
 	defer c.printOrder.RUnlock()
-	return c.spool(ctx, queue, data, zplSuffix, "-o", "raw")
+	return c.spool(ctx, queue, data, "-o", "raw")
 }
 
 // printDocument spools data as a DOCUMENT and returns the CUPS request id.
@@ -313,7 +331,7 @@ func (c *cupsClient) printDocument(
 	if !inverting {
 		c.printOrder.RLock()
 		defer c.printOrder.RUnlock()
-		return c.spool(ctx, queue, data, pdfSuffix)
+		return c.spool(ctx, queue, data)
 	}
 
 	c.printOrder.Lock()
@@ -330,7 +348,7 @@ func (c *cupsClient) printDocument(
 		return "", fmt.Errorf("transform inverting PDF: %w", err)
 	}
 
-	requestID, err := c.spool(ctx, queue, upright, zplSuffix, "-o", "raw")
+	requestID, err := c.spool(ctx, queue, upright, "-o", "raw")
 	if err != nil {
 		return "", err
 	}
@@ -340,39 +358,32 @@ func (c *cupsClient) printDocument(
 	// request values while runFor still gives the lp submission its own bound.
 	restoreContext := context.WithoutCancel(ctx)
 	if _, err := c.spool(restoreContext, queue, []byte(restoreSavedConfiguration),
-		zplSuffix, "-o", "raw"); err != nil {
+		"-o", "raw"); err != nil {
 		return "", fmt.Errorf("restore saved printer configuration: %w", err)
 	}
 	return requestID, nil
 }
 
-// spool writes data to a temp file with suffix and hands it to `lp -d <queue>`
-// with options, returning the CUPS request id. Both print paths share it so the
-// spool-file lifecycle, the print timeout, and the failure text stay identical
-// no matter what is being printed; only the suffix and the options differ.
+// spool hands data to `lp -d <queue>` with options on standard input and
+// returns the CUPS request id. The job lives only in memory on the agent's
+// side: no spool file is written, so a label never touches the agent's disk
+// (CUPS still spools it while queued and removes the data once it is done).
+// Both print paths share it so the print timeout and the failure text stay
+// identical no matter what is being printed; only the options differ.
 func (c *cupsClient) spool(
-	ctx context.Context, queue string, data []byte, suffix string, options ...string,
+	ctx context.Context, queue string, data []byte, options ...string,
 ) (string, error) {
-	file, err := os.CreateTemp("", tempPrefix+"-*"+suffix)
-	if err != nil {
-		return "", fmt.Errorf("create spool file: %w", err)
-	}
-	path := file.Name()
-	defer os.Remove(path)
-	if _, err := file.Write(data); err != nil {
-		file.Close()
-		return "", fmt.Errorf("write spool file: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return "", fmt.Errorf("close spool file: %w", err)
-	}
-
-	args := make([]string, 0, len(options)+3)
+	args := make([]string, 0, len(options)+2)
 	args = append(args, "-d", queue)
 	args = append(args, options...)
-	args = append(args, path)
 
-	result, err := c.runFor(ctx, c.printTimeout, cupsPrintTimeout, "lp", args...)
+	timeout := c.printTimeout
+	if timeout <= 0 {
+		timeout = cupsPrintTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := c.runner.RunInput(ctx, data, "lp", args...)
 	if err != nil {
 		return "", err
 	}
@@ -384,6 +395,106 @@ func (c *cupsClient) spool(
 		return "", fmt.Errorf("%s", detail)
 	}
 	return parseRequestID(result.Stdout), nil
+}
+
+// errNotDelivered marks a job that CUPS still held when the caller's deadline
+// ran out: the printer never took it.
+var errNotDelivered = errors.New("printer did not take the job in time")
+
+// awaitDelivery blocks until CUPS has handed requestID to the printer, or ctx
+// ends. `lp` exiting 0 only means CUPS queued the job: an unreachable network
+// printer leaves it queued, retrying forever, while the queue still reads
+// enabled, so answering on `lp` alone reports a label that may never print.
+//
+// A job is delivered once it leaves `lpstat -W not-completed` AND its completed
+// record carries no cancel or abort reason. A failing poll is retried rather
+// than trusted, until ctx ends.
+func (c *cupsClient) awaitDelivery(ctx context.Context, queue string, requestID string) error {
+	if requestID == "" {
+		return fmt.Errorf("lp returned no request id to track")
+	}
+	for {
+		pending, err := c.jobPending(ctx, queue, requestID)
+		if err == nil && !pending {
+			return c.jobOutcome(ctx, queue, requestID)
+		}
+		timer := time.NewTimer(deliveryPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errNotDelivered
+		case <-timer.C:
+		}
+	}
+}
+
+// jobPending reports whether requestID is still in the queue's not-completed
+// list.
+func (c *cupsClient) jobPending(ctx context.Context, queue string, requestID string) (bool, error) {
+	result, err := c.run(ctx, "lpstat", "-W", "not-completed", "-o", queue)
+	if err != nil {
+		return false, err
+	}
+	if result.ExitCode != 0 {
+		return false, fmt.Errorf("lpstat could not list jobs for %s", queue)
+	}
+	_, listed := parseJobAlerts(result.Stdout, requestID)
+	return listed, nil
+}
+
+// jobOutcome reads a finished job's reasons and fails one that CUPS cancelled
+// or aborted. A job missing from the completed history left the queue the
+// normal way, so it counts as delivered.
+func (c *cupsClient) jobOutcome(ctx context.Context, queue string, requestID string) error {
+	result, err := c.run(ctx, "lpstat", "-l", "-W", "completed", "-o", queue)
+	if err != nil {
+		return err
+	}
+	alerts, _ := parseJobAlerts(result.Stdout, requestID)
+	if strings.Contains(alerts, canceledJobReason) || strings.Contains(alerts, abortedJobReason) {
+		return fmt.Errorf("job %s ended without printing (%s)", requestID, alerts)
+	}
+	return nil
+}
+
+// cancelJob removes requestID from CUPS so a job the caller was told failed can
+// never print later as a surprise duplicate. It runs on its own bound because
+// it follows an expired request deadline.
+func (c *cupsClient) cancelJob(ctx context.Context, requestID string) error {
+	result, err := c.run(context.WithoutCancel(ctx), "cancel", requestID)
+	if err != nil {
+		return err
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("cancel %s: %s", requestID, strings.TrimSpace(result.Stderr))
+	}
+	return nil
+}
+
+// parseJobAlerts finds requestID in `lpstat [-l] -W … -o <queue>` output and
+// returns its `Alerts:` value (empty without -l) and whether it was listed.
+// Each job opens with an unindented line whose first field is its request id;
+// the long form follows it with tab-indented Status/Alerts/queued lines.
+func parseJobAlerts(output string, requestID string) (string, bool) {
+	listed := false
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		indented := strings.HasPrefix(line, "\t") || strings.HasPrefix(line, " ")
+		if !indented {
+			if listed {
+				break
+			}
+			listed = fields[0] == requestID
+			continue
+		}
+		if listed && fields[0] == "Alerts:" {
+			return strings.Join(fields[1:], " "), true
+		}
+	}
+	return "", listed
 }
 
 // parseQueueEnabled reads a queue's enabled/disabled state out of `lpstat -p`

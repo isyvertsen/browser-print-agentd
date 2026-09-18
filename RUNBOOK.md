@@ -768,6 +768,7 @@ inferred from the man pages:
 | No `lpstat -v` row at all                | The queue does not exist; see [Adding a printer queue](#adding-a-printer-queue)                                                               |
 | Row exists, printer physically unplugged | Correct behaviour: the agent omits it from `/available`                                                                                       |
 | `lpstat` itself hangs                    | A wedged USB device. Each probe is bounded at 900 ms, so the agent reports it unhealthy rather than hanging — the printer needs a power cycle  |
+| Print fails with `did not take job … within 20s; the job was cancelled`, log shows `undelivered` | The queue looked healthy but the printer never answered (network down, VPN/Tailscale down, printer off). Check `nc -z <host> 9100`; the cancelled job will not print later, so just retry once the printer is reachable |
 
 Then prove the CUPS path end-to-end, bypassing the agent entirely:
 

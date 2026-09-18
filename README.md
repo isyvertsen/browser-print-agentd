@@ -234,6 +234,12 @@ is **health-checked at job initiation** with USB-to-network failover, so a job n
 into a dead printer; and every request's `Origin` is logged, with an optional allowlist enforced
 on `/write`.
 
+**Delivery deadline.** A print only answers `200` once the printer has actually taken the job. If
+it has not within 20 seconds — an unreachable network printer, say — the agent cancels the job in
+CUPS and answers a plain-text `500`, so a label the caller was told failed can never print later
+as a surprise duplicate. The agent holds jobs only in memory and writes no spool file of its own;
+CUPS spools the job while it waits and removes it when done.
+
 The first four rows are the **frozen** Zebra-compatible surface. Their paths, request and response
 shapes, status codes, plain-text error bodies, and the CORS origin echo are compatibility surface
 and do not change. The last two rows are **additive extensions** — they are not part of the frozen
@@ -244,7 +250,7 @@ them answers those paths with the plain-text `404` its default arm has always pr
 | ------ | ------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `GET`  | `/available`  | `{"printer": [Device, …]}` — only queues that can actually print, USB before network, inside a 1500 ms probe budget       |
 | `GET`  | `/default`    | one `Device` object, or an **empty body** when nothing is healthy (an empty JSON object here would break callers)         |
-| `POST` | `/write`      | spools `{"data": "<raw ZPL>"}` to the requested (or resolved) printer; empty `200` on success, plain-text body on failure |
+| `POST` | `/write`      | spools `{"data": "<raw ZPL>"}` to the requested (or resolved) printer; empty `200` once the printer has taken the job, plain-text body on failure |
 | `POST` | `/read`       | empty `200` — dead surface for most callers, kept so the agent stays a drop-in                                            |
 | `GET`  | `/health`     | **additive** diagnostics: running version, origin posture, and every queue's health                                      |
 | `GET`  | `/`           | **additive**: the status page for the person at the Mac — which printer labels go to, which sites may print, recent activity, and a form to allow or remove a site. No CORS, strict CSP, same-origin form only |

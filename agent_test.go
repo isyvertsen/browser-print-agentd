@@ -53,6 +53,11 @@ const (
 	rejectingLine = "%s not accepting requests since Fri Jul 24 16:02:21 2026 -\n\tRejecting Jobs\n"
 	deviceLine    = "device for %s: %s\n"
 
+	// `lpstat [-l] -W … -o <queue>` job lines, captured from CUPS 2.3.4: the
+	// request id, owner, size and time, then with -l the job's reasons.
+	jobLine        = "%-23s operator          1024   Fri 18 Sep 09:36:05 2026\n"
+	jobDetailLines = "\tStatus: \n\tAlerts: %s\n\tqueued for %s\n"
+
 	// `lpoptions -p <queue>` in the shape CUPS emits it: the WHOLE destination on
 	// ONE line as space-separated key=value pairs, with a value carrying spaces
 	// single-quoted — which the driver identity always is. The surrounding pairs
@@ -132,6 +137,20 @@ type fakeCUPS struct {
 	// optionsFail makes every lpoptions invocation fail the way a missing binary
 	// does, to pin what an unanswerable driver probe is treated as.
 	optionsFail bool
+
+	// undelivered keeps every spooled job in the not-completed list, the way
+	// CUPS holds a job for a printer that never answers. Unset, a job leaves
+	// the queue as soon as it is spooled, as it does for a reachable printer.
+	undelivered bool
+
+	// cancelledInCUPS has CUPS itself cancel each job as it is spooled, so it
+	// leaves the not-completed list without ever reaching the printer.
+	cancelledInCUPS bool
+
+	// jobs is every request id lp handed out, and cancelled the ones the agent
+	// removed with `cancel`.
+	jobs      []string
+	cancelled []string
 }
 
 const sampleRasterLabelZPL = "~DGR:CUPS.GRF,2,1,\n4008^XA\n" +
@@ -169,10 +188,23 @@ func (f *fakeCUPS) Run(ctx context.Context, name string, args ...string) (execRe
 		return f.lpstat(args)
 	case "lpoptions":
 		return f.lpoptions(args)
-	case "lp":
-		return f.lp(args)
+	case "cancel":
+		f.cancelled = append(f.cancelled, args...)
+		return execResult{}, nil
 	}
 	return execResult{}, fmt.Errorf("unexpected command in test: %s %v", name, args)
+}
+
+// RunInput records lp with the job it was handed on standard input.
+func (f *fakeCUPS) RunInput(
+	ctx context.Context, input []byte, name string, args ...string,
+) (execResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if name == "lp" {
+		return f.lp(args, input)
+	}
+	return execResult{}, fmt.Errorf("unexpected stdin command in test: %s %v", name, args)
 }
 
 // lpoptions answers the driver probe for one queue.
@@ -202,6 +234,9 @@ func (f *fakeCUPS) lpstat(args []string) (execResult, error) {
 			fmt.Fprintf(&out, deviceLine, device.Queue, device.URI)
 		}
 		return execResult{Stdout: out.String()}, nil
+	}
+	if jobs, ok := f.jobListing(args); ok {
+		return jobs, nil
 	}
 	longStatus := len(args) >= 3 && args[0] == "-l" && args[1] == "-p"
 	shortStatus := len(args) >= 2 && args[0] == "-p"
@@ -241,18 +276,63 @@ func (f *fakeCUPS) lpstat(args []string) (execResult, error) {
 	return execResult{ExitCode: 1}, nil
 }
 
-func (f *fakeCUPS) lp(args []string) (execResult, error) {
-	call := lpCall{Args: append([]string(nil), args...)}
-	if len(args) > 0 {
-		if payload, err := os.ReadFile(args[len(args)-1]); err == nil {
-			call.Payload = payload
-		}
-	}
+func (f *fakeCUPS) lp(args []string, input []byte) (execResult, error) {
+	call := lpCall{Args: append([]string(nil), args...), Payload: append([]byte(nil), input...)}
 	f.lpCalls = append(f.lpCalls, call)
 	if f.lpExit != 0 {
 		return execResult{ExitCode: f.lpExit, Stderr: f.lpErr}, nil
 	}
-	return execResult{Stdout: "request id is " + args[1] + "-11 (1 file)\n"}, nil
+	requestID := fmt.Sprintf("%s-%d", args[1], 11+len(f.jobs))
+	f.jobs = append(f.jobs, requestID)
+	if f.cancelledInCUPS {
+		f.cancelled = append(f.cancelled, requestID)
+	}
+	return execResult{Stdout: "request id is " + requestID + " (0 file(s))\n"}, nil
+}
+
+// jobListing answers `lpstat [-l] -W <which> -o <queue>` in the shape captured
+// from CUPS 2.3.4: one unindented line per job, and with -l the tab-indented
+// Status/Alerts lines. A delivered job reads completed with the reason CUPS
+// reports after handing it to the device; a cancelled one says so.
+func (f *fakeCUPS) jobListing(args []string) (execResult, bool) {
+	long := len(args) > 0 && args[0] == "-l"
+	if long {
+		args = args[1:]
+	}
+	if len(args) != 4 || args[0] != "-W" || args[2] != "-o" {
+		return execResult{}, false
+	}
+	queue := args[3]
+	var out strings.Builder
+	for _, requestID := range f.jobs {
+		if !strings.HasPrefix(requestID, queue+"-") {
+			continue
+		}
+		cancelled := false
+		for _, gone := range f.cancelled {
+			cancelled = cancelled || gone == requestID
+		}
+		pending := f.undelivered && !cancelled
+		if (args[1] == "not-completed") != pending {
+			continue
+		}
+		fmt.Fprintf(&out, jobLine, requestID)
+		if long {
+			reason := "processing-to-stop-point"
+			if cancelled {
+				reason = "job-canceled-by-user"
+			}
+			fmt.Fprintf(&out, jobDetailLines, reason, queue)
+		}
+	}
+	return execResult{Stdout: out.String()}, true
+}
+
+// cancels returns the request ids the agent cancelled.
+func (f *fakeCUPS) cancels() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.cancelled...)
 }
 
 // calls returns a copy of the recorded lp invocations.
@@ -797,6 +877,76 @@ func TestWriteStreamsLargePayloadsVerbatim(t *testing.T) {
 	}
 }
 
+// @lat: [[tests#Agent Core#Write Succeeds Only Once The Printer Takes The Job]]
+func TestWriteSucceedsOnlyOnceThePrinterTakesTheJob(t *testing.T) {
+	delivered := twoPrinterCUPS(stateEnabled, stateEnabled)
+	base, logs := startAgent(t, delivered, nil)
+	status, body := postWrite(t, base, "", map[string]any{"data": "^XA^XZ"})
+	if status != http.StatusOK || body != "" {
+		t.Fatalf("/write = %d %q, want 200 once the job left the queue", status, body)
+	}
+	if cancels := delivered.cancels(); len(cancels) != 0 {
+		t.Fatalf("cancelled %v, want nothing cancelled for a delivered job", cancels)
+	}
+	if !strings.Contains(logs.String(), "write ok") {
+		t.Fatalf("log = %q, want a write ok line", logs.String())
+	}
+
+	// Leaving the not-completed list is not delivery by itself: a job CUPS
+	// cancelled leaves it too, and must not read as printed.
+	cancelled := twoPrinterCUPS(stateEnabled, stateEnabled)
+	cancelled.cancelledInCUPS = true
+	base, _ = startAgent(t, cancelled, nil)
+	status, body = postWrite(t, base, "", map[string]any{"data": "^XA^XZ"})
+	if status != http.StatusInternalServerError ||
+		!strings.Contains(body, "ended without printing") {
+		t.Fatalf("/write = %d %q, want 500 naming a job that ended without printing",
+			status, body)
+	}
+}
+
+// @lat: [[tests#Agent Core#Undelivered Job Is Cancelled At The Deadline]]
+func TestUndeliveredJobIsCancelledAtTheDeadline(t *testing.T) {
+	requests := map[string]map[string]any{
+		"/write":     {"data": "^XA^XZ"},
+		"/print-pdf": {"data": base64.StdEncoding.EncodeToString(samplePDF)},
+	}
+	for path, request := range requests {
+		t.Run(path, func(t *testing.T) {
+			fake := twoPrinterCUPS(stateEnabled, stateEnabled)
+			fake.undelivered = true
+			base, logs, handler := startAgentWith(t, fake,
+				agentOptions{OriginAllow: []string{allowAllOrigins}})
+			handler.writeBudget = 300 * time.Millisecond
+
+			started := time.Now()
+			status, body := postJSON(t, base, path, "", request)
+			elapsed := time.Since(started)
+
+			if status != http.StatusInternalServerError ||
+				!strings.Contains(body, "did not take job") ||
+				!strings.Contains(body, "cancelled") {
+				t.Fatalf("%s = %d %q, want 500 saying the job was cancelled", path, status, body)
+			}
+			if elapsed > 3*time.Second {
+				t.Fatalf("%s answered after %s, want it bounded by the deadline", path, elapsed)
+			}
+			calls := fake.calls()
+			if len(calls) != 1 {
+				t.Fatalf("lp calls = %d, want one job and no failover after the deadline",
+					len(calls))
+			}
+			cancels := fake.cancels()
+			if len(cancels) != 1 || !strings.HasPrefix(cancels[0], usbQueue+"-") {
+				t.Fatalf("cancelled %v, want the one queued job removed from CUPS", cancels)
+			}
+			if !strings.Contains(logs.String(), "undelivered") {
+				t.Fatalf("log = %q, want an undelivered line", logs.String())
+			}
+		})
+	}
+}
+
 // @lat: [[tests#Agent Core#Print PDF Spools A Document Without Raw]]
 func TestPrintPDFSpoolsADocumentWithoutRaw(t *testing.T) {
 	fake := twoPrinterCUPS(stateEnabled, stateEnabled)
@@ -815,8 +965,8 @@ func TestPrintPDFSpoolsADocumentWithoutRaw(t *testing.T) {
 		t.Fatalf("lp calls = %d, want exactly one", len(calls))
 	}
 	argv := calls[0].Args
-	if len(argv) < 3 || argv[0] != "-d" || argv[1] != usbQueue {
-		t.Fatalf("lp argv = %v, want -d <queue> … <file>", argv)
+	if len(argv) < 2 || argv[0] != "-d" || argv[1] != usbQueue {
+		t.Fatalf("lp argv = %v, want -d <queue> …", argv)
 	}
 
 	// THE invariant of this route, asserted before anything else about the argv
@@ -825,18 +975,15 @@ func TestPrintPDFSpoolsADocumentWithoutRaw(t *testing.T) {
 	// `/print-pdf` must NOT, because a PDF is not printer-native and raw bytes
 	// would reach the device unrendered. Neither failure errors — both silently
 	// print the wrong thing — so the option is asserted in both directions.
-	for _, arg := range argv[:len(argv)-1] { // every argument except the spool path
+	for _, arg := range argv {
 		if arg == "-o" || arg == "raw" {
 			t.Fatalf("lp argv = %v, want NO -o raw: a PDF must go through the CUPS "+
 				"filter chain or it reaches the device unrendered and prints as garbage",
 				argv)
 		}
 	}
-	if len(argv) != 3 {
-		t.Fatalf("lp argv = %v, want exactly -d <queue> <file>", argv)
-	}
-	if !strings.HasSuffix(argv[2], ".pdf") {
-		t.Fatalf("spool file = %q, want a .pdf suffix", argv[2])
+	if len(argv) != 2 {
+		t.Fatalf("lp argv = %v, want exactly -d <queue>, the PDF on stdin", argv)
 	}
 	if !bytes.Equal(calls[0].Payload, samplePDF) {
 		t.Fatalf("spooled %d bytes, want the %d-byte decoded PDF verbatim",
@@ -879,12 +1026,12 @@ func TestPrintPDFConvertsAnInvertingDriverToInlineGraphics(t *testing.T) {
 	}
 	argv := calls[0].Args
 	want := []string{"-d", usbQueue, "-o", "raw"}
-	if len(argv) != len(want)+1 {
-		t.Fatalf("lp argv = %v, want -d <queue> -o raw <file>", argv)
+	if len(argv) != len(want) {
+		t.Fatalf("lp argv = %v, want -d <queue> -o raw", argv)
 	}
 	for index, expected := range want {
 		if argv[index] != expected {
-			t.Fatalf("lp argv = %v, want %v followed by the spool path", argv, want)
+			t.Fatalf("lp argv = %v, want %v", argv, want)
 		}
 	}
 
@@ -1098,9 +1245,9 @@ func TestPrintPDFRestoresSavedPrinterOrientation(t *testing.T) {
 					restoreSavedConfiguration)
 			}
 			argv := restore.Args
-			if len(argv) != 5 || argv[0] != "-d" || argv[1] != usbQueue ||
+			if len(argv) != 4 || argv[0] != "-d" || argv[1] != usbQueue ||
 				argv[2] != "-o" || argv[3] != "raw" {
-				t.Fatalf("restore lp argv = %v, want -d <queue> -o raw <file>", argv)
+				t.Fatalf("restore lp argv = %v, want -d <queue> -o raw", argv)
 			}
 		})
 	}
@@ -1152,8 +1299,8 @@ func TestPrintPDFLeavesANonInvertingDriverAlone(t *testing.T) {
 				t.Fatalf("lp calls = %d, want exactly one", len(calls))
 			}
 			argv := calls[0].Args
-			if len(argv) != 3 || argv[0] != "-d" || argv[1] != usbQueue {
-				t.Fatalf("lp argv = %v, want exactly -d <queue> <file>: a driver that "+
+			if len(argv) != 2 || argv[0] != "-d" || argv[1] != usbQueue {
+				t.Fatalf("lp argv = %v, want exactly -d <queue>: a driver that "+
 					"does not flip must be spooled unrotated, or the compensation "+
 					"becomes the bug", argv)
 			}
