@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,9 +21,10 @@ const (
 	// as "no agent" instead of "no printer".
 	availableBudget = 1200 * time.Millisecond
 
-	// writeBudget bounds a print job end to end. A 4x6 label is ~540 KB of
-	// uncompressed ^GFA hex, so spooling gets real headroom that a health probe
-	// does not.
+	// writeBudget bounds a print job end to end, from the request arriving to
+	// the printer taking the job. A 4x6 label is ~540 KB of uncompressed ^GFA
+	// hex, so spooling gets real headroom that a health probe does not; a job
+	// the printer has not taken by then is cancelled and reported as failed.
 	writeBudget = 20 * time.Second
 
 	// maxWriteBody caps a /write body. ZPL never approaches this; a larger body
@@ -80,6 +82,10 @@ type agent struct {
 	// printers decides which CUPS queues are label printers at all. A queue
 	// that fails the match is invisible to every route except /health.
 	printers *printerMatcher
+
+	// writeBudget is the print routes' deadline — the writeBudget constant in
+	// production, shortened by tests that exercise an undelivered job.
+	writeBudget time.Duration
 }
 
 // agentOptions is everything a station configures on the agent beyond its
@@ -107,6 +113,8 @@ func newAgent(runner execRunner, logger *agentLogger, options agentOptions) *age
 		logger:   logger,
 		origins:  newOriginPolicy(options.OriginAllow, options.OriginsFile),
 		printers: &printerMatcher{pattern: pattern, drivers: drivers},
+
+		writeBudget: writeBudget,
 	}
 }
 
@@ -240,6 +248,33 @@ func (a *agent) handleRead(w http.ResponseWriter, r *http.Request) {
 	sendText(w, http.StatusOK, "")
 }
 
+// confirmDelivery holds a print route's answer until the printer has taken the
+// spooled job, inside the same deadline as the rest of the request. A job still
+// queued when it runs out is cancelled, so a caller told "failed" can never get
+// a late surprise print, and no failover follows: the deadline is spent.
+func (a *agent) confirmDelivery(
+	ctx context.Context, action string, target printer, requestID string,
+) error {
+	err := a.cups.awaitDelivery(ctx, target.Queue, requestID)
+	if err == nil {
+		return nil
+	}
+	if requestID != "" {
+		if cancelErr := a.cups.cancelJob(ctx, requestID); cancelErr != nil {
+			a.logger.undelivered(action, target, requestID, "cancel failed: "+cancelErr.Error())
+			return fmt.Errorf("printer %s did not take job %s within %s, and cancelling it failed: %v",
+				target.Queue, requestID, a.writeBudget, cancelErr)
+		}
+	}
+	if errors.Is(err, errNotDelivered) {
+		a.logger.undelivered(action, target, requestID, "cancelled after "+a.writeBudget.String())
+		return fmt.Errorf("printer %s did not take job %s within %s; the job was cancelled",
+			target.Queue, requestID, a.writeBudget)
+	}
+	a.logger.undelivered(action, target, requestID, err.Error())
+	return err
+}
+
 // handleWrite spools raw ZPL, failing over rather than failing when the pinned
 // printer died between listing and writing.
 func (a *agent) handleWrite(w http.ResponseWriter, r *http.Request, origin string) {
@@ -273,7 +308,7 @@ func (a *agent) handleWrite(w http.ResponseWriter, r *http.Request, origin strin
 	}
 	data := []byte(*payload.Data)
 
-	ctx, cancel := context.WithTimeout(r.Context(), writeBudget)
+	ctx, cancel := context.WithTimeout(r.Context(), a.writeBudget)
 	defer cancel()
 
 	target, err := a.resolveTarget(ctx, "write", payload.requestedPrinter())
@@ -285,6 +320,11 @@ func (a *agent) handleWrite(w http.ResponseWriter, r *http.Request, origin strin
 	requestID, err := a.cups.printRaw(ctx, target.Queue, data)
 	if err != nil {
 		a.logger.job("write", false, len(data), target, "", origin)
+		sendText(w, http.StatusInternalServerError, err.Error()+"\n")
+		return
+	}
+	if err := a.confirmDelivery(ctx, "write", target, requestID); err != nil {
+		a.logger.job("write", false, len(data), target, requestID, origin)
 		sendText(w, http.StatusInternalServerError, err.Error()+"\n")
 		return
 	}
@@ -350,7 +390,7 @@ func (a *agent) handlePrintPDF(w http.ResponseWriter, r *http.Request, origin st
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), writeBudget)
+	ctx, cancel := context.WithTimeout(r.Context(), a.writeBudget)
 	defer cancel()
 
 	target, err := a.resolveTarget(ctx, "print-pdf", payload.requestedPrinter())
@@ -368,6 +408,11 @@ func (a *agent) handlePrintPDF(w http.ResponseWriter, r *http.Request, origin st
 	requestID, err := a.cups.printDocument(ctx, target.Queue, document, inverting)
 	if err != nil {
 		a.logger.job("print-pdf", false, len(document), target, "", origin)
+		sendText(w, http.StatusInternalServerError, err.Error()+"\n")
+		return
+	}
+	if err := a.confirmDelivery(ctx, "print-pdf", target, requestID); err != nil {
+		a.logger.job("print-pdf", false, len(document), target, requestID, origin)
 		sendText(w, http.StatusInternalServerError, err.Error()+"\n")
 		return
 	}

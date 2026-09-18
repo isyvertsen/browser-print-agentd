@@ -28,7 +28,7 @@ var envPrefix = strings.ToUpper(strings.ReplaceAll(productName, "-", "_"))
 // tempPrefix is the shared prefix of every temp file this product creates, and
 // mirrors `TEMP_PREFIX` in packaging/identity.sh. It is deliberately shorter
 // than productName and therefore restated rather than derived: the packaging
-// chain's `mktemp` templates and this package's spool files are meant to share
+// chain's `mktemp` templates and this package's render directories are meant to share
 // one visibly common prefix in `ls /tmp`, which is what makes an orphaned file
 // attributable at a glance.
 const tempPrefix = "browser-print"

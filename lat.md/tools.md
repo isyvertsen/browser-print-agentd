@@ -51,13 +51,15 @@ Every CUPS call the agent makes goes through `[[cups.go#cupsClient]]`, which is 
 only coupling point: raw queues are gone from macOS and printer drivers are deprecated, so the
 backend has to stay swappable.
 
-`[[cups.go#cupsClient#printRaw]]` always spools ZPL with `lp -d <queue> -o raw <file>`. `-o raw`
+`[[cups.go#cupsClient#printRaw]]` always spools ZPL with `lp -d <queue> -o raw`, the job on stdin. `-o raw`
 is load-bearing rather than an optimization: the hardware spike proved that without it the
 `zebra.ppd` filter rasterizes the ZPL into a `~DGR:CUPS.GRF` bitmap (42 source bytes became 5553
 on the wire) and the label prints as a picture of itself — it does not error, it silently prints
 the wrong thing. `[[cups.go#cupsClient#printDocument]]` omits `-o raw` for exactly the same
 reason read the other way, and both go through `[[cups.go#cupsClient#spool]]` so only the lp
-options and the temp-file suffix ever differ. Queues themselves are created (by the installer,
+options ever differ. The job reaches `lp` on standard input and the agent writes no spool file, so
+a label lives only in the agent's memory; CUPS still spools it under `/var/spool/cups` while
+queued and drops the data once the job is done. Queues themselves are created (by the installer,
 not the agent) with
 `-m drv:///sample.drv/zebra.ppd`, because `lpadmin -m raw` now exits 1 with
 `Raw queues are no longer supported on macOS.` and the `raw  Raw Queue` line `lpinfo -m` still
@@ -153,6 +155,29 @@ before network), prints, returns 200, and logs an explicit fallback line naming 
 device. Only when NO printer is healthy does the job fail, with a plain-text non-2xx the caller
 surfaces as a send error. The divergence is invisible to the transport, which still just sends
 `{device, data}` and reads a status.
+
+### Delivery Deadline
+
+A print route answers only once the printer has taken the job, within the 20 s request deadline;
+a job still queued then is cancelled and the request fails.
+
+Health is judged before spooling, and it cannot see everything: an unreachable network printer
+leaves its queue enabled and accepting, `lp` exits 0, and CUPS retries the job forever. Answering
+on `lp` alone therefore reported "Sent" for a label that might print an hour later — or twice,
+after the operator tried again. `[[server.go#agent#confirmDelivery]]` closes that gap by holding
+the answer on `[[cups.go#cupsClient#awaitDelivery]]`, which polls `lpstat -W not-completed` for
+the request id every 250 ms. Leaving that list is not delivery by itself — a cancelled or aborted
+job leaves it too — so `[[cups.go#cupsClient#jobOutcome]]` reads the job's `Alerts:` reasons from
+`lpstat -l -W completed` and fails one that says `canceled` or `aborted`
+(`[[cups.go#parseJobAlerts]]`).
+
+The deadline is the whole request's `writeBudget`, so spooling and waiting share one 20 s bound.
+When it runs out, `[[cups.go#cupsClient#cancelJob]]` removes the job on a context of its own, the
+caller gets a plain-text `500` naming the queue and the job, and the log carries an `undelivered`
+line. No failover follows, because the deadline is spent. The wait itself holds nothing but the
+request id in memory: the agent keeps no queue of its own, and nothing survives a restart. For an
+inverting-driver PDF only the label job is awaited; its `^JUR` restore job stays queued behind it
+and is harmless whenever it prints.
 
 ## Document Printing
 

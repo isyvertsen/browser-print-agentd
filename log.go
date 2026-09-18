@@ -107,6 +107,13 @@ func (l *agentLogger) fallback(action string, requested string, target printer) 
 		action, requested, target.UID, target.Queue))
 }
 
+// undelivered records a job CUPS accepted but the printer never took, and
+// what became of it, so a station that "printed nothing" has a line saying why.
+func (l *agentLogger) undelivered(action string, target printer, requestID string, reason string) {
+	l.write(fmt.Sprintf("%s undelivered queue=%s lp=%s: %s",
+		action, target.Queue, requestID, reason))
+}
+
 // job records the outcome of a spooled print job.
 func (l *agentLogger) job(
 	action string, ok bool, byteCount int, target printer, requestID string, origin string,
