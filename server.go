@@ -177,6 +177,8 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.handleRead(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/health":
 		a.handleHealth(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/config":
+		a.handleConfig(w, r)
 	default:
 		sendText(w, http.StatusNotFound, "not found\n")
 	}
@@ -238,6 +240,20 @@ func (a *agent) handleDefault(w http.ResponseWriter, r *http.Request) {
 func (a *agent) handleRead(w http.ResponseWriter, r *http.Request) {
 	io.Copy(io.Discard, io.LimitReader(r.Body, maxWriteBody))
 	sendText(w, http.StatusOK, "")
+}
+
+// handleConfig answers the Zebra SDK's getApplicationConfiguration probe, which
+// callers use as their "is the agent running" check: a 404 here reads as "not
+// installed" even while /available answers fine. It carries no version field —
+// the header and /health stay the only version surface — and advertises no
+// conversions, because the agent never converts images for sendFile.
+func (a *agent) handleConfig(w http.ResponseWriter, r *http.Request) {
+	sendJSON(w, http.StatusOK, map[string]any{
+		"application": map[string]any{
+			"supportedConversions": map[string]any{},
+			"platform":             "macos",
+		},
+	})
 }
 
 // handleWrite spools raw ZPL, failing over rather than failing when the pinned

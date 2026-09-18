@@ -236,7 +236,7 @@ on `/write`.
 
 The first four rows are the **frozen** Zebra-compatible surface. Their paths, request and response
 shapes, status codes, plain-text error bodies, and the CORS origin echo are compatibility surface
-and do not change. The last two rows are **additive extensions** — they are not part of the frozen
+and do not change. The remaining rows are **additive extensions** — they are not part of the frozen
 contract, no caller of the frozen four is affected by their existence, and an agent that predates
 them answers those paths with the plain-text `404` its default arm has always produced.
 
@@ -246,6 +246,7 @@ them answers those paths with the plain-text `404` its default arm has always pr
 | `GET`  | `/default`    | one `Device` object, or an **empty body** when nothing is healthy (an empty JSON object here would break callers)         |
 | `POST` | `/write`      | spools `{"data": "<raw ZPL>"}` to the requested (or resolved) printer; empty `200` on success, plain-text body on failure |
 | `POST` | `/read`       | empty `200` — dead surface for most callers, kept so the agent stays a drop-in                                            |
+| `GET`  | `/config`     | **additive**: `{"application": {"supportedConversions": {}, "platform": "macos"}}` — answers the Zebra SDK's `getApplicationConfiguration()`, which callers use as their "is it running" probe. No version field |
 | `GET`  | `/health`     | **additive** diagnostics: running version, origin posture, and every queue's health                                      |
 | `GET`  | `/`           | **additive**: the status page for the person at the Mac — which printer labels go to, which sites may print, recent activity, and a form to allow or remove a site. No CORS, strict CSP, same-origin form only |
 | `POST` | `/print-pdf`  | **additive**: spools `{"data": "<base64 PDF>"}` as a rendered document; same `200`/plain-text convention as `/write`      |
