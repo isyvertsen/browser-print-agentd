@@ -11,8 +11,14 @@ report phantom success.
 
 `[[server.go#agent#ServeHTTP]]` routes `GET /available`, `GET /default`, `POST /write`,
 `POST /read` and the `OPTIONS` preflight in exactly the shapes the calling transport parses,
-echoing the request `Origin` back as `Access-Control-Allow-Origin`. Two additive routes sit beside
-them: `GET /health` and `POST /print-pdf` ([[tools#Print Agent#Document Printing]]).
+echoing the request `Origin` back as `Access-Control-Allow-Origin`. Three additive routes sit beside
+them: `GET /health`, `POST /print-pdf` ([[tools#Print Agent#Document Printing]]), and `GET /config`.
+
+`[[server.go#agent#handleConfig]]` exists because callers built on the Zebra SDK probe
+`getApplicationConfiguration()` — `GET /config` — to decide whether the agent is running at all,
+and treat a `404` as "not installed" even while `/available` answers. It returns a fixed
+`{"application": {...}}` object with no version field, keeping the header and `/health` the only
+version surface, and an empty `supportedConversions`, because the agent never converts images.
 `Access-Control-Allow-Headers: Content-Type` is the narrowest surface here and the one that
 decides whether a caller reaches the agent at all. A probe carrying any other header — a tracing
 SDK's `sentry-trace`, an auth token, anything a fetch wrapper adds — stops being a simple request,
